@@ -1,6 +1,12 @@
 # tac_infra
 A private infra for VTLA
 
+# quick start
+    #   conda create -n vtla python=3.10 -y
+    #   conda activate vtla
+    #   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    #   pip install -r requirements.txt
+
 # git useage
     # 开始写代码前
     git pull --rebase origin main

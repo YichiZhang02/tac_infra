@@ -1,0 +1,145 @@
+#!/bin/bash
+REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
+
+# ===================触觉 backbone（Tactile MAE）预训练启动器===================
+# 复用 vtla/tac_encoder/tactile_mae，直接吃 LeRobot 数据训练 AnyTouch stage1 风格的 MAE。
+# dataset_ids 第一个位置参数，可一个也可多个（多个用引号包成一串，空格分隔）
+#   单个: bash train_enc.sh rm_nist_260320_strawberry
+#   多个: bash train_enc.sh "rm_nist_260320_strawberry rm_nist_260520_usb"
+dataset_ids=${1:-rm_nist_260320_strawberry}
+init_mode=${2:-anytouch}        # scratch | clip | anytouch
+arch=${3:-vit_l}                # vit_l | vit_b
+
+# 输出/日志命名标签：当前时间 + 数据集数量（如 20260603_210836_2ds），可用 RUN_NAME 覆盖
+num_datasets=$(echo "${dataset_ids}" | wc -w)
+run_tag=${RUN_NAME:-$(date +%Y_%m%d)}
+
+
+# ===================初始化权重（统一 pretrained_path，按 arch 选择）===================
+# 三种初始化由一个 pretrained_path 驱动，加载器自动识别来源：
+#   scratch  -> 空，随机初始化
+#   clip     -> HF CLIP 目录，加载 encoder+projection（有 B 和 L 两种）
+#   anytouch -> AnyTouch 权重（.pth 或转好的 HF 目录），strict 加载完整 MAE（仅 L）
+PM=${REPO_ROOT}/playground/pretrained_models
+pretrained_path=
+case "${init_mode}" in
+  scratch)
+    pretrained_path=
+    ;;
+  clip)
+    case "${arch}" in
+      vit_l) pretrained_path=${PM}/CLIP-ViT-L-14-DataComp.XL-s13B-b90K ;;
+      vit_b) pretrained_path=${PM}/CLIP-ViT-B-16-DataComp.XL-s13B-b90K ;;   # 需 HF 格式（bundled CLIP-B-16 仅 open_clip，需先转换）
+      *)     echo "Unknown arch: ${arch} (expected vit_l|vit_b)"; exit 1 ;;
+    esac
+    ;;
+  anytouch)
+    if [ "${arch}" != "vit_l" ]; then
+      echo "anytouch 仅有 ViT-L 权重，不支持 arch=${arch}（请用 scratch 或 clip）"; exit 1
+    fi
+    pretrained_path=${PM}/AnyTouch-ViT-L-16   # 或转换后的 ${PM}/anytouch_mae_vitl
+    ;;
+  *)
+    echo "Unknown init_mode: ${init_mode} (expected scratch|clip|anytouch)"; exit 1
+    ;;
+esac
+
+# ===================训练配置===================
+gpu_id=${GPU_ID:-0,1,2,3}
+num_processes=${4:-4}
+batch_size=${5:-128}
+epochs=${6:-100}
+warmup_epochs=${WARMUP_EPOCHS:-1}
+num_workers=${NUM_WORKERS:-12}
+# 稳定性：bf16 autocast 防 fp16 溢出 NaN（lr 已通过 blr 调小，无需梯度裁剪）
+amp_dtype=${AMP_DTYPE:-bfloat16}
+# 默认随机端口（20000-39999），便于同时跑多个；可用 MASTER_PORT 固定
+master_port=${MASTER_PORT:-$((20000 + RANDOM % 20000))}
+
+# ===================触觉路由/MAE 配置===================
+# sensor_id: -1=agnostic（默认）| 3=gelsight 系 | 6=空闲槽位
+sensor_id=${SENSOR_ID:--1}
+mask_ratio=${MASK_RATIO:-0.75}
+val_ratio=${VAL_RATIO:-0.05}
+# 可见区重建 loss 权重 λ：loss = loss_masked + λ·loss_visible（0=标准 MAE）
+visible_loss_weight=${VISIBLE_LOSS_WEIGHT:-0.1}
+# 触觉相机 key（按数据集命名调整）
+finger_cams=${FINGER_CAMS:-"observation.images.cam_finger0 observation.images.cam_finger1"}
+
+# 接触帧筛选：只挑接触帧训练（逐通道 std > 阈值），非接触帧随机保留 keep_ratio
+# CONTACT_FILTER=0 可关闭；首次运行会算并缓存各数据集 meta/contact_std.npz
+contact_filter=${CONTACT_FILTER:-1}
+contact_std_threshold=${CONTACT_STD_THRESHOLD:-0.5}
+noncontact_keep_ratio=${NONCONTACT_KEEP_RATIO:-0.05}
+# 构建 contact_std 缓存时逐 episode 顺序解码，每隔 stride 帧算一次 std（其余就近填充），加速首次缓存
+contact_stride=${CONTACT_STRIDE:-1}
+contact_args=
+if [ "${contact_filter}" = "1" ]; then
+  contact_args="--contact_filter --contact_std_threshold ${contact_std_threshold} --noncontact_keep_ratio ${noncontact_keep_ratio} --contact_stride ${contact_stride}"
+fi
+
+# ===================路径配置===================
+dataset_root=${REPO_ROOT}/playground/data
+output_root=${REPO_ROOT}/playground/results/backbones
+output_dir=${output_root}/${run_tag}_tacmae_${arch}_from_${init_mode}
+log_root=${REPO_ROOT}/playground/logs/backbones
+mkdir -p "${output_dir}" "${log_root}"
+log_file="${log_root}/${run_tag}_tacmae_${arch}_${init_mode}.log"
+
+# 记录本次 run 用到的数据集（每行一个 dataset_id），便于回溯
+printf '%s\n' ${dataset_ids} > "${output_dir}/datasets.txt"
+
+# ===================启动器（单卡 python / 多卡 torchrun）===================
+if [ "${num_processes}" -gt 1 ]; then
+  launcher="torchrun --nproc_per_node=${num_processes} --master_port=${master_port} -m"
+else
+  launcher="python -m"
+fi
+
+# 与 train.sh 一致：参数打印 + 训练整体管道给 tee，日志落 playground/logs。
+{
+echo "Log file: $log_file"
+echo "Dataset(s): ${dataset_ids}"
+echo "Init mode: ${init_mode} | Arch: ${arch}"
+echo "Pretrained path: ${pretrained_path:-<scratch>}"
+echo "Sensor id: ${sensor_id} | Mask ratio: ${mask_ratio} | Val ratio: ${val_ratio}"
+echo "Contact filter: ${contact_filter} (perchannel-std thr=${contact_std_threshold}, keep_ratio=${noncontact_keep_ratio})"
+echo "Epochs: ${epochs} | Batch size: ${batch_size} | Num processes: ${num_processes}"
+echo "Output dir: ${output_dir}"
+
+echo "[stage 1/2] Warm up dataset caches"
+PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python -m vtla.tac_encoder.tactile_mae.process_data \
+    --dataset_root ${dataset_root} \
+    --dataset_ids ${dataset_ids} \
+    --camera_keys ${finger_cams} \
+    --val_ratio ${val_ratio} \
+    --tolerance_s 0.1 \
+    ${contact_args} \
+    --num_workers ${num_workers}
+
+echo "[stage 2/2] Train tactile MAE backbone"
+PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id ${launcher} \
+    vtla.tac_encoder.tactile_mae.train \
+    --arch ${arch} \
+    --pretrained_path "${pretrained_path}" \
+    --dataset_root ${dataset_root} \
+    --dataset_ids ${dataset_ids} \
+    --camera_keys ${finger_cams} \
+    --sensor_id ${sensor_id} \
+    --mask_ratio ${mask_ratio} \
+    --visible_loss_weight ${visible_loss_weight} \
+    --use_sensor_token \
+    --use_same_patchemb \
+    --sensor_token_for_all --beta_start 0.0 --beta_end 0.75 \
+    --batch_size ${batch_size} \
+    --epochs ${epochs} \
+    --warmup_epochs ${warmup_epochs} \
+    --weight_decay 0.1 \
+    --blr 1e-5 \
+    --amp_dtype ${amp_dtype} \
+    --val_ratio ${val_ratio} \
+    --tolerance_s 0.1 \
+    ${contact_args} \
+    --num_workers ${num_workers} \
+    --output_dir "${output_dir}"
+} 2>&1 | tee "$log_file"

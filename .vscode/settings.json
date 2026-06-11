@@ -1,0 +1,18 @@
+{
+  "files.watcherExclude": {
+    "**/playground/data/**": true,
+    "**/playground/pretrained_models/**": true,
+    "**/.cache/**": true,
+    "**/__pycache__/**": true
+  },
+  "search.exclude": {
+    "**/playground/data/**": true,
+    "**/playground/pretrained_models/**": true,
+    "**/.cache/**": true,
+    "**/__pycache__/**": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.cache": true
+  }
+}

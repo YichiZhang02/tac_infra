@@ -1,0 +1,457 @@
+#!/usr/bin/env python
+
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Train a VTLA policy with supervised fine-tuning."""
+
+import dataclasses
+import logging
+import time
+from contextlib import nullcontext
+from pprint import pformat
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+
+import torch
+from termcolor import colored
+from torch.optim import Optimizer
+from tqdm import tqdm
+
+from vtla.datasets import EpisodeAwareSampler, make_dataset
+from vtla.engine.common.train_utils import (
+    get_step_checkpoint_dir,
+    load_training_state,
+    save_checkpoint,
+    update_last_checkpoint,
+)
+from vtla.engine.common.wandb_utils import WandBLogger
+from vtla.engine.configs import parser
+from vtla.engine.configs.train import TrainPipelineConfig
+from vtla.engine.optim.factory import make_optimizer_and_scheduler
+from vtla.engine.utils.import_utils import register_third_party_plugins, require_package
+from vtla.engine.utils.logging_utils import AverageMeter, MetricsTracker
+from vtla.engine.utils.random_utils import set_seed
+from vtla.engine.utils.utils import (
+    cycle,
+    format_big_number,
+    has_method,
+    init_logging,
+    inside_slurm,
+)
+from vtla.frameworks.factory import make_policy, make_pre_post_processors
+from vtla.frameworks.pretrained import PreTrainedPolicy
+
+
+def update_policy(
+    train_metrics: MetricsTracker,
+    policy: PreTrainedPolicy,
+    batch: Any,
+    optimizer: Optimizer,
+    grad_clip_norm: float,
+    accelerator: "Accelerator",
+    lr_scheduler=None,
+    lock=None,
+) -> tuple[MetricsTracker, dict | None]:
+    """
+    Performs a single training step to update the policy's weights.
+
+    This function executes the forward and backward passes, clips gradients, and steps the optimizer and
+    learning rate scheduler. Accelerator handles mixed-precision training automatically.
+
+    Args:
+        train_metrics: A MetricsTracker instance to record training statistics.
+        policy: The policy model to be trained.
+        batch: A batch of training data.
+        optimizer: The optimizer used to update the policy's parameters.
+        grad_clip_norm: The maximum norm for gradient clipping.
+        accelerator: The Accelerator instance for distributed training and mixed precision.
+        lr_scheduler: An optional learning rate scheduler.
+        lock: An optional lock for thread-safe optimizer updates.
+    Returns:
+        A tuple containing:
+        - The updated MetricsTracker with new statistics for this step.
+        - A dictionary of outputs from the policy's forward pass, for logging purposes.
+    """
+    start_time = time.perf_counter()
+    policy.train()
+
+    # Let accelerator handle mixed precision
+    with accelerator.autocast():
+        loss, output_dict = policy.forward(batch)
+
+        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
+
+    # Use accelerator's backward method
+    accelerator.backward(loss)
+
+    # Clip gradients if specified
+    if grad_clip_norm > 0:
+        grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+    else:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            policy.parameters(), float("inf"), error_if_nonfinite=False
+        )
+
+    # Optimizer step
+    with lock if lock is not None else nullcontext():
+        optimizer.step()
+
+    optimizer.zero_grad()
+
+    # Step through pytorch scheduler at every batch instead of epoch
+    if lr_scheduler is not None:
+        lr_scheduler.step()
+
+    # Update internal buffers if policy has update method
+    if has_method(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "update"):
+        accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
+
+    train_metrics.loss = loss.item()
+    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.lr = optimizer.param_groups[0]["lr"]
+    train_metrics.update_s = time.perf_counter() - start_time
+    return train_metrics, output_dict
+
+
+@parser.wrap()
+def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
+    """
+    Main function to train a policy.
+
+    This function orchestrates the supervised fine-tuning pipeline: logging, seeding,
+    dataset/policy/optimizer setup, checkpoint resumption, training updates, metrics,
+    checkpointing, and optional Hub upload.
+
+    Args:
+        cfg: A `TrainPipelineConfig` object containing all training configurations.
+        accelerator: Optional Accelerator instance. If None, one will be created automatically.
+    """
+    require_package("accelerate", extra="training")
+    from accelerate import Accelerator
+
+    cfg.validate()
+    if cfg.policy is None:
+        raise ValueError("vtla.train requires a policy config for SFT training.")
+
+    # Create Accelerator if not provided
+    # It will automatically detect if running in distributed mode or single-process mode
+    # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
+    # We set find_unused_parameters=True to handle models with conditional computation
+    if accelerator is None:
+        from accelerate.utils import DistributedDataParallelKwargs
+
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
+        # Force the device to be CPU when the active policy config's device is set to CPU.
+        force_cpu = cfg.trainable_config.device == "cpu"
+        accelerator = Accelerator(
+            step_scheduler_with_optimizer=False,
+            kwargs_handlers=[ddp_kwargs],
+            cpu=force_cpu,
+        )
+
+    init_logging(accelerator=accelerator)
+
+    # Determine if this is the main process (for logging and checkpointing)
+    # When using accelerate, only the main process should log to avoid duplicate outputs
+    is_main_process = accelerator.is_main_process
+
+    # Only log on main process
+    if is_main_process:
+        logging.info(pformat(cfg.to_dict()))
+
+    # Initialize wandb only on main process
+    if cfg.wandb.enable and cfg.wandb.project and is_main_process:
+        wandb_logger = WandBLogger(cfg)
+    else:
+        wandb_logger = None
+        if is_main_process:
+            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+
+    if cfg.seed is not None:
+        set_seed(cfg.seed, accelerator=accelerator)
+
+    # Use accelerator's device
+    device = accelerator.device
+    if cfg.cudnn_deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+
+    # Dataset loading synchronization: main process downloads first to avoid race conditions
+    if is_main_process:
+        logging.info("Creating dataset")
+        dataset = make_dataset(cfg)
+
+    accelerator.wait_for_everyone()
+
+    # Now all other processes can safely load the dataset
+    if not is_main_process:
+        dataset = make_dataset(cfg)
+
+    if is_main_process:
+        logging.info("Creating policy")
+    policy = make_policy(
+        cfg=cfg.policy,
+        ds_meta=dataset.meta,
+        rename_map=cfg.rename_map,
+    )
+
+    if cfg.peft is not None:
+        from peft import PeftModel
+
+        if isinstance(policy, PeftModel):
+            logging.info("PEFT adapter already loaded from checkpoint, skipping wrap_with_peft.")
+        else:
+            logging.info("Using PEFT! Wrapping model.")
+            peft_cli_overrides = dataclasses.asdict(cfg.peft)
+            policy = policy.wrap_with_peft(peft_cli_overrides=peft_cli_overrides)
+
+    # Wait for all processes to finish model creation before continuing
+    accelerator.wait_for_everyone()
+
+    active_cfg = cfg.trainable_config
+    processor_pretrained_path = active_cfg.pretrained_path
+    if (
+        getattr(active_cfg, "use_relative_actions", False)
+        and processor_pretrained_path is not None
+        and not cfg.resume
+    ):
+        logging.warning(
+            "use_relative_actions=true with pretrained processors can skip relative transforms if "
+            "the checkpoint processors do not define them. Building processors from current policy config."
+        )
+        processor_pretrained_path = None
+
+    processor_kwargs = {}
+    postprocessor_kwargs = {}
+    if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
+        processor_kwargs["dataset_stats"] = dataset.meta.stats
+
+    if processor_pretrained_path is not None:
+        processor_kwargs["preprocessor_overrides"] = {
+            "device_processor": {"device": device.type},
+            "normalizer_processor": {
+                "stats": dataset.meta.stats,
+                "features": {**policy.config.input_features, **policy.config.output_features},
+                "norm_map": policy.config.normalization_mapping,
+            },
+        }
+        processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
+            "rename_map": cfg.rename_map
+        }
+        if getattr(active_cfg, "type", None) == "pi05":
+            processor_kwargs["preprocessor_overrides"][
+                "pi05_prepare_state_tokenizer_processor_step"
+            ] = {
+                "state_mode": getattr(active_cfg, "state_mode", "joint"),
+                "max_state_dim": getattr(active_cfg, "max_state_dim", 32),
+            }
+        postprocessor_kwargs["postprocessor_overrides"] = {
+            "unnormalizer_processor": {
+                "stats": dataset.meta.stats,
+                "features": policy.config.output_features,
+                "norm_map": policy.config.normalization_mapping,
+            },
+        }
+
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=cfg.policy,
+        pretrained_path=processor_pretrained_path,
+        **processor_kwargs,
+        **postprocessor_kwargs,
+    )
+
+    if is_main_process:
+        logging.info("Creating optimizer and scheduler")
+    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
+
+    step = 0  # number of policy updates (forward + backward + optim)
+
+    if cfg.resume:
+        step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
+
+    num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+    num_total_params = sum(p.numel() for p in policy.parameters())
+
+    if is_main_process:
+        logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
+        logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
+        logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
+        logging.info(f"{dataset.num_episodes=}")
+        num_processes = accelerator.num_processes
+        effective_bs = cfg.batch_size * num_processes
+        logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
+        logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
+        logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+
+    # create dataloader for offline training
+    if hasattr(active_cfg, "drop_n_last_frames"):
+        shuffle = False
+        sampler = EpisodeAwareSampler(
+            dataset.meta.episodes["dataset_from_index"],
+            dataset.meta.episodes["dataset_to_index"],
+            episode_indices_to_use=dataset.episodes,
+            drop_n_last_frames=active_cfg.drop_n_last_frames,
+            shuffle=True,
+        )
+    else:
+        shuffle = True
+        sampler = None
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=cfg.num_workers,
+        batch_size=cfg.batch_size,
+        shuffle=shuffle and not cfg.dataset.streaming,
+        sampler=sampler,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
+        prefetch_factor=cfg.prefetch_factor if cfg.num_workers > 0 else None,
+        persistent_workers=cfg.persistent_workers and cfg.num_workers > 0,
+    )
+
+    # Prepare everything with accelerator
+    accelerator.wait_for_everyone()
+    policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+        policy, optimizer, dataloader, lr_scheduler
+    )
+    dl_iter = cycle(dataloader)
+
+    policy.train()
+
+    train_metrics = {
+        "loss": AverageMeter("loss", ":.3f"),
+        "grad_norm": AverageMeter("grdn", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+    }
+
+    # Keep global batch size for logging; MetricsTracker handles world size internally.
+    effective_batch_size = cfg.batch_size * accelerator.num_processes
+    train_tracker = MetricsTracker(
+        cfg.batch_size,
+        dataset.num_frames,
+        dataset.num_episodes,
+        train_metrics,
+        initial_step=step,
+        accelerator=accelerator,
+    )
+
+    if is_main_process:
+        progbar = tqdm(
+            total=cfg.steps - step,
+            desc="Training",
+            unit="step",
+            disable=inside_slurm(),
+            position=0,
+            leave=True,
+        )
+        logging.info(
+            f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
+        )
+
+    for _ in range(step, cfg.steps):
+        start_time = time.perf_counter()
+        batch = next(dl_iter)
+        for cam_key in dataset.meta.camera_keys:
+            if cam_key in batch and batch[cam_key].dtype == torch.uint8:
+                batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
+        batch = preprocessor(batch)
+        train_tracker.dataloading_s = time.perf_counter() - start_time
+
+        train_tracker, output_dict = update_policy(
+            train_tracker,
+            policy,
+            batch,
+            optimizer,
+            cfg.optimizer.grad_clip_norm,
+            accelerator=accelerator,
+            lr_scheduler=lr_scheduler,
+        )
+
+        # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
+        # increment `step` here.
+        step += 1
+        if is_main_process:
+            progbar.update(1)
+            progbar.set_postfix(
+                loss=f"{train_tracker.loss.val:.3f}",
+                lr=f"{train_tracker.lr.val:.1e}",
+            )
+        train_tracker.step()
+        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
+        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+
+        if is_log_step:
+            logging.info(train_tracker)
+            if wandb_logger:
+                wandb_log_dict = train_tracker.to_dict()
+                if output_dict:
+                    wandb_log_dict.update(output_dict)
+                wandb_logger.log_dict(wandb_log_dict, step)
+            train_tracker.reset_averages()
+
+        if cfg.save_checkpoint and is_saving_step:
+            if is_main_process:
+                logging.info(f"Checkpoint policy after step {step}")
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                save_checkpoint(
+                    checkpoint_dir=checkpoint_dir,
+                    step=step,
+                    cfg=cfg,
+                    policy=accelerator.unwrap_model(policy),
+                    optimizer=optimizer,
+                    scheduler=lr_scheduler,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                )
+                update_last_checkpoint(checkpoint_dir)
+                if wandb_logger:
+                    wandb_logger.log_policy(checkpoint_dir)
+
+            accelerator.wait_for_everyone()
+
+    if is_main_process:
+        progbar.close()
+
+    if is_main_process:
+        logging.info("End of training")
+
+        if getattr(active_cfg, "push_to_hub", False):
+            unwrapped_model = accelerator.unwrap_model(policy)
+            if cfg.policy.use_peft:
+                unwrapped_model.push_model_to_hub(cfg, peft_model=unwrapped_model)
+            else:
+                unwrapped_model.push_model_to_hub(cfg)
+            preprocessor.push_to_hub(active_cfg.repo_id)
+            postprocessor.push_to_hub(active_cfg.repo_id)
+
+    # Properly clean up the distributed process group
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
+
+
+def main():
+    register_third_party_plugins()
+    train()
+
+
+if __name__ == "__main__":
+    main()

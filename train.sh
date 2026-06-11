@@ -1,0 +1,137 @@
+#!/bin/bash
+REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
+
+# ===================模型和数据集配置===================
+dataset_id=${1:-rm_nist_260320_strawberry}
+policy_type=${2:-starvla_groot}          # act | diffusion | pi05 | starvla_groot
+
+# 两个不同概念，按 policy_type 绑定：
+#   pretrained_path = 完整 policy 检查点（含 model.safetensors + 预/后处理器），
+#     传给 --policy.pretrained_path，会触发 from_pretrained 加载整个 policy。pi05_base 属于这种。
+#   base_vlm = 仅 starvla_groot 用，是底座 VLM（HF 模型目录），传给 --policy.base_vlm，
+#     policy 本身从零训练，所以这种情况 pretrained_path 必须留空。
+pretrained_path=
+base_vlm=
+case "${policy_type}" in
+  pi05)          pretrained_path=playground/pretrained_models/pi05_base ;;
+  starvla_groot) base_vlm=playground/pretrained_models/Qwen3.5-0.8B ;;
+  act|diffusion) : ;;  # 这两个从零训练
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot)"; exit 1 ;;
+esac
+# ===================训练配置===================
+gpu_id=0,1,2,3
+num_processes=${3:-1}
+batch_size=${4:-16}
+steps=${5:-5_000}
+save_freq=${steps}
+log_freq=100
+
+# ===================视觉/触觉路由（四个 framework 通用）===================
+# wrist_only: true 只用 wrist 相机; false 用 top + wrist
+# tactile_mode: none(触觉不进模型) / as_image(触觉作为图像输入) / encode(触觉 encoder, 预留未实现)
+# state_mode: none(完全不用 state) / joint(关节角) / ee(末端位姿，当前预留未实现)
+wrist_only=${6:-false}
+tactile_mode=${7:-none}
+state_mode=${8:-none}
+
+# tactile encoder（仅 tactile_mode=encode 时生效）
+#   tactile_encoder_path: tactile-MAE 权重（.pth）或 HF 目录，作为 encoder 初始化；
+#     arch / sensor_id / image_size 会从 checkpoint 自动读取，无需手动指定。
+#     注意：encode 模式下 tactile-MAE encoder + query token 会随 policy 一起训练（非冻结）。
+#   tactile_insert_location: encoder | decoder（Diffusion 忽略该项）。
+#   tactile_num_tokens: 每张触觉图的可学习 query token 数（默认 8）；总 token = 指数 × 该值。
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${9:-/mnt/data/xidong_data/tac_infra/playground/pretrained_models/AnyTouch-ViT-L-16}}
+tactile_insert_location=${TACTILE_INSERT_LOCATION:-${10:-encoder}}
+tactile_num_tokens=${TACTILE_NUM_TOKENS:-8}
+
+# 相机 key（按数据集命名调整）
+top_cam=${TOP_CAM:-observation.images.cam_top}
+wrist_cam=${WRIST_CAM:-observation.images.cam_right_wrist}
+
+policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}"
+
+# ===================路径配置===================
+dataset_root=${REPO_ROOT}/playground/data
+output_root=${REPO_ROOT}/playground/results/models
+output_dir=${output_root}/${dataset_id}_${policy_type}_${policy_suffix}
+
+# ===================按 framework 拼装专属参数===================
+# 不同 framework 的配置字段不同（act/diffusion 没有 dtype/compile_model/
+# gradient_checkpointing 等），统一在这里按类型追加，避免 draccus 报未知参数。
+extra_args=""
+case "${policy_type}" in
+  pi05)
+    extra_args="${extra_args} --policy.dtype=bfloat16 --policy.compile_model=false --policy.gradient_checkpointing=false"
+    ;;
+  starvla_groot)
+    extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
+    ;;
+  act|diffusion)
+    : # 这两个没有 VLM/dtype 相关字段
+    ;;
+  *)
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot)"; exit 1
+    ;;
+esac
+
+# pretrained_path 是所有 framework 的公共字段；非空才传
+if [ -n "${pretrained_path}" ]; then
+  extra_args="${extra_args} --policy.pretrained_path=${pretrained_path}"
+fi
+
+# tactile_mode=encode 时追加 tactile encoder 相关参数（四个 framework 通用）
+if [ "${tactile_mode}" = "encode" ]; then
+  if [ -z "${tactile_encoder_path}" ]; then
+    echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 9 个位置参数）指向 tactile-MAE 权重"; exit 1
+  fi
+  extra_args="${extra_args} --policy.tactile_encoder_path=${tactile_encoder_path}"
+  extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
+  extra_args="${extra_args} --policy.tactile_num_tokens=${tactile_num_tokens}"
+fi
+
+# ===================日志文件===================
+# 训练日志（含下面的参数打印 + accelerate/训练全部 stdout+stderr）保存到 output_dir 下，
+# 固定文件名 train.log，每次运行覆盖（只留最新）。终端仍实时显示（靠 tee）。
+log_dir=${REPO_ROOT}/playground/logs/models
+mkdir -p "${log_dir}"
+log_file="${log_dir}/${dataset_id}_${policy_type}_${policy_suffix}.log"
+
+# 用花括号组把「参数打印 + 训练」整体管道给 tee，这样日志里既有配置也有训练过程。
+# 注：dash 不支持 set -o pipefail，脚本退出码会是 tee 的(0)；这是训练启动器，可接受。
+{
+echo "Log file: $log_file"
+echo "Training with dataset: $dataset_id"
+echo "Policy type: $policy_type"
+echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
+echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
+echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode"
+if [ "${tactile_mode}" = "encode" ]; then
+  echo "Tactile encoder path: ${tactile_encoder_path} | Insert: ${tactile_insert_location} | Num tokens: ${tactile_num_tokens} (encoder trained jointly)"
+fi
+echo "Output dir: $output_dir"
+echo "Extra args: ${extra_args}"
+
+PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id accelerate launch \
+    --num_processes=$num_processes \
+    -m vtla.train \
+    --dataset.repo_id=$dataset_id \
+    --dataset.root=${dataset_root}/${dataset_id} \
+    --dataset.video_backend=pyav \
+    --policy.type=${policy_type} \
+    --policy.wrist_only=${wrist_only} \
+    --policy.tactile_mode=${tactile_mode} \
+    --policy.state_mode=${state_mode} \
+    --policy.top_camera_key=${top_cam} \
+    --policy.wrist_camera_key=${wrist_cam} \
+    --policy.device=cuda \
+    --policy.push_to_hub=false \
+    ${extra_args} \
+    --output_dir=${output_dir} \
+    --job_name=${dataset_id}_${policy_type}_${policy_suffix} \
+    --steps=${steps} \
+    --save_freq=${save_freq} \
+    --batch_size=${batch_size} \
+    --log_freq=${log_freq} \
+    --tolerance_s=0.04 \
+    --wandb.enable=false
+} 2>&1 | tee "$log_file"

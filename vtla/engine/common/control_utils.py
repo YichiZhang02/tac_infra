@@ -27,8 +27,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
-from lerobot.policies import PreTrainedPolicy, prepare_observation_for_inference
-from lerobot.utils.import_utils import _deepdiff_available, require_package
+from vtla.frameworks.pretrained import PreTrainedPolicy
+from vtla.frameworks.utils import prepare_observation_for_inference
+from vtla.engine.utils.import_utils import _deepdiff_available, require_package
 
 if TYPE_CHECKING or _deepdiff_available:
     from deepdiff import DeepDiff
@@ -36,10 +37,10 @@ else:
     DeepDiff = None
 
 if TYPE_CHECKING:
-    from lerobot.datasets import LeRobotDataset
-from lerobot.processor import PolicyProcessorPipeline
-from lerobot.robots import Robot
-from lerobot.types import PolicyAction
+    from vtla.datasets.lerobot_dataset import LeRobotDataset
+    from deployment.robots import Robot  # 仅类型检查，无运行时反向依赖
+from vtla.engine.processor.pipeline import PolicyProcessorPipeline
+from vtla.engine.types import PolicyAction
 
 
 @cache
@@ -225,7 +226,7 @@ def sanity_check_dataset_robot_compatibility(
     """
     require_package("deepdiff", extra="deepdiff-dep")
 
-    from lerobot.utils.constants import DEFAULT_FEATURES
+    from vtla.engine.utils.constants import DEFAULT_FEATURES
 
     fields = [
         ("robot_type", dataset.meta.robot_type, robot.robot_type),

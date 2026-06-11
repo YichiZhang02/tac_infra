@@ -17,7 +17,7 @@ import os
 
 import numpy as np
 
-from lerobot.types import RobotAction, RobotObservation
+from vtla.engine.types import RobotAction, RobotObservation
 
 from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
 from .import_utils import require_package

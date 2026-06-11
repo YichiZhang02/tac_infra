@@ -2,10 +2,10 @@
 A private infra for VTLA
 
 # quick start
-    #   conda create -n vtla python=3.10 -y
-    #   conda activate vtla
-    #   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-    #   pip install -r requirements.txt
+    conda create -n vtla python=3.10 -y
+    conda activate vtla
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    pip install -r requirements.txt
 
 # git useage
     # 开始写代码前
@@ -13,7 +13,7 @@ A private infra for VTLA
 
     # 写完后
     git add .
-    git commit -m "一个说明"
+    git commit -m ""
     git push origin main
 
     # 另一台服务器同步

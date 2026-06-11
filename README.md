@@ -13,8 +13,12 @@ A private infra for VTLA
 
     # 写完后
     git add .
-    git commit -m ""
+    git commit -m "1"
     git push origin main
 
     # 另一台服务器同步
     git pull origin main
+
+    # 强制同步
+    git fetch origin
+    git reset --hard origin/main

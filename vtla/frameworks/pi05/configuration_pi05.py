@@ -69,7 +69,7 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
     # Add empty images. Used to add empty cameras when no image features are present.
     empty_cameras: int = 0
 
-    # wrist_only / top_camera_key / wrist_camera_key / tactile_keys / tactile_mode /
+    # wrist_only / top_camera_keys / wrist_camera_keys / tactile_keys / tactile_mode /
     # tactile_encoder_type come from SensorRoutingMixin.
 
     tokenizer_max_length: int = 200  # see openpi `__post_init__`

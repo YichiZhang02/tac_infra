@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
 
 # ===================触觉 backbone（Tactile MAE）预训练启动器===================
@@ -6,7 +6,7 @@ REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
 # dataset_ids 第一个位置参数，可一个也可多个（多个用引号包成一串，空格分隔）
 #   单个: bash train_enc.sh rm_nist_260320_strawberry
 #   多个: bash train_enc.sh "rm_nist_260320_strawberry rm_nist_260520_usb"
-dataset_ids=${1:-rm_nist_260320_strawberry}
+dataset_ids=${1:-rm_umi_dual_pen_open}
 init_mode=${2:-anytouch}        # scratch | clip | anytouch
 arch=${3:-vit_l}                # vit_l | vit_b
 
@@ -53,8 +53,8 @@ warmup_epochs=${WARMUP_EPOCHS:-1}
 num_workers=${NUM_WORKERS:-12}
 # 稳定性：bf16 autocast 防 fp16 溢出 NaN（lr 已通过 blr 调小，无需梯度裁剪）
 amp_dtype=${AMP_DTYPE:-bfloat16}
-# 默认随机端口（20000-39999），便于同时跑多个；可用 MASTER_PORT 固定
-master_port=${MASTER_PORT:-$((20000 + RANDOM % 20000))}
+# 默认端口（20000-39999），便于同时跑多个；可用 MASTER_PORT 固定
+master_port=${MASTER_PORT:-$((20000 + $$ % 20000))}
 
 # ===================触觉路由/MAE 配置===================
 # sensor_id: -1=agnostic（默认）| 3=gelsight 系 | 6=空闲槽位
@@ -63,8 +63,14 @@ mask_ratio=${MASK_RATIO:-0.75}
 val_ratio=${VAL_RATIO:-0.05}
 # 可见区重建 loss 权重 λ：loss = loss_masked + λ·loss_visible（0=标准 MAE）
 visible_loss_weight=${VISIBLE_LOSS_WEIGHT:-0.1}
-# 触觉相机 key（按数据集命名调整）
-finger_cams=${FINGER_CAMS:-"observation.images.cam_finger0 observation.images.cam_finger1"}
+# ===================触觉相机 key（按数据集命名调整，支持多路）===================
+# 与 train.sh 统一为列表写法 [key1,key2,...]（无需给每个元素加引号）。
+# 双臂数据 rm_umi_dual_pen_open 有四路 finger（left/right × finger0/1）。
+# 注：本脚本底层是 argparse(nargs="+")，所以下面会把列表转成空格分隔再传 --camera_keys。
+tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
+# 列表 [a,b,c] -> 空格分隔 "a b c"
+_tac_csv=${tactile_keys#[}; _tac_csv=${_tac_csv%]}
+finger_cams=$(printf '%s' "${_tac_csv}" | tr ',' ' ')
 
 # 接触帧筛选：只挑接触帧训练（逐通道 std > 阈值），非接触帧随机保留 keep_ratio
 # CONTACT_FILTER=0 可关闭；首次运行会算并缓存各数据集 meta/contact_std.npz
@@ -103,6 +109,7 @@ echo "Dataset(s): ${dataset_ids}"
 echo "Init mode: ${init_mode} | Arch: ${arch}"
 echo "Pretrained path: ${pretrained_path:-<scratch>}"
 echo "Sensor id: ${sensor_id} | Mask ratio: ${mask_ratio} | Val ratio: ${val_ratio}"
+echo "Tactile keys: ${tactile_keys}  ->  --camera_keys ${finger_cams}"
 echo "Contact filter: ${contact_filter} (perchannel-std thr=${contact_std_threshold}, keep_ratio=${noncontact_keep_ratio})"
 echo "Epochs: ${epochs} | Batch size: ${batch_size} | Num processes: ${num_processes}"
 echo "Output dir: ${output_dir}"

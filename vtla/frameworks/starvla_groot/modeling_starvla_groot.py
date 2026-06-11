@@ -24,7 +24,6 @@ from collections import deque
 
 import numpy as np
 import torch
-from PIL import Image
 from torch import Tensor
 
 from vtla.engine.utils.constants import ACTION, OBS_STATE
@@ -35,19 +34,6 @@ from ..tactile_encode import TactileEncoder
 from .action_head.flow_matching_head import ActionHeadConfig, FlowmatchingActionHead
 from .configuration_starvla_groot import StarvlaGrootConfig
 from .qwen_vl_interface import QwenVLInterface
-
-
-def _tensor_to_pil(img: Tensor) -> Image.Image:
-    """Convert a single CHW float[0,1] (or uint8) image tensor to a PIL image."""
-    if img.dim() != 3:
-        raise ValueError(f"Expected a CHW image tensor, got shape {tuple(img.shape)}")
-    arr = img.detach().cpu()
-    if arr.dtype != torch.uint8:
-        arr = (arr.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8)
-    arr = arr.permute(1, 2, 0).numpy()  # CHW -> HWC
-    if arr.shape[-1] == 1:
-        arr = np.repeat(arr, 3, axis=-1)
-    return Image.fromarray(arr)
 
 
 class StarvlaGrootPolicy(PreTrainedPolicy):
@@ -81,6 +67,7 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
             base_vlm=config.base_vlm,
             attn_implementation=config.attn_implementation,
             dtype=load_dtype,
+            image_resolution=config.image_resolution,
         )
 
         # Align the DiT cross-attention dim to the VLM hidden size.
@@ -153,8 +140,19 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
     # ------------------------------------------------------------------
     # Batch -> model-input bridging
     # ------------------------------------------------------------------
-    def _build_images(self, batch: dict[str, Tensor]) -> list[list[Image.Image]]:
-        """Collect multi-view camera tensors into per-sample lists of PIL images."""
+    def _build_images(self, batch: dict[str, Tensor]) -> Tensor:
+        """Collect multi-view camera tensors into a GPU stack ``[B, V, C, H, W]``.
+
+        Each view is resized on GPU to the Qwen ``smart_resize`` target (a constant for a
+        square ``image_resolution``, e.g. 256), so all views share a resolution and can be
+        stacked. Downsizing here keeps the per-frame Qwen vision-token count bounded: raw
+        frames (e.g. 896x896) would otherwise emit ~1 token per merged 32x32 px and blow up
+        the VLM self-attention (O(L^2)) and the action-head cross-attention KV length.
+
+        No tensor->CPU->PIL round-trip: the heavy preprocessing stays on GPU.
+        """
+        import torch.nn.functional as F
+
         vlm_image_keys = self.config.vlm_image_keys()
         present_keys = [key for key in vlm_image_keys if key in batch]
         if not present_keys:
@@ -163,24 +161,24 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
                 f"got batch keys {list(batch.keys())}"
             )
 
-        # Downsize cameras to `image_resolution` before handing them to the Qwen
-        # processor. Raw dataset frames (e.g. 896x896) otherwise pass through at full
-        # resolution: Qwen emits ~1 token per 32x32 px, so an 896x896 frame becomes 784
-        # vision tokens and a multi-view sample exceeds 1000 tokens, blowing up the VLM
-        # self-attention (O(L^2)) and the action-head cross-attention KV length. At
-        # 224x224 each frame is only 49 tokens.
-        target_h, target_w = self.config.image_resolution
+        device = next(self.parameters()).device
+        target_h, target_w = self.qwen_vl._target_h, self.qwen_vl._target_w
 
-        bsize = batch[present_keys[0]].shape[0]
-        images: list[list[Image.Image]] = [[] for _ in range(bsize)]
+        views: list[Tensor] = []
         for key in present_keys:
-            cam = batch[key]  # [B, C, H, W]
-            for b in range(bsize):
-                img = _tensor_to_pil(cam[b])
-                if img.size != (target_w, target_h):
-                    img = img.resize((target_w, target_h), Image.BILINEAR)
-                images[b].append(img)
-        return images
+            cam = batch[key]  # [B, C, H, W], float in [0, 1] (LeRobot VISUAL=IDENTITY)
+            if cam.dim() != 4:
+                raise ValueError(f"Expected camera '{key}' as [B, C, H, W], got {tuple(cam.shape)}")
+            cam = cam.to(device=device, dtype=torch.float32, non_blocking=True)
+            if cam.shape[-2:] != (target_h, target_w):
+                cam = F.interpolate(
+                    cam, size=(target_h, target_w), mode="bilinear",
+                    align_corners=False, antialias=True,
+                )
+            views.append(cam)
+
+        # [B, V, C, H, W], view order == present_keys order (matches input_ids placeholders).
+        return torch.stack(views, dim=1)
 
     def _get_instructions(self, batch: dict[str, Tensor], bsize: int) -> list[str]:
         tasks = batch.get("task")

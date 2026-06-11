@@ -64,6 +64,59 @@ def _kept_indices(std_cache, camera_keys, contact_filter, thr, keep_ratio, seed)
     return out
 
 
+def summarize_contact_filter(std_cache, camera_keys, thr, keep_ratio, seed):
+    """Return per-camera counts using the same sampling rule as frame-cache filtering."""
+    rng = np.random.RandomState(seed)
+    per_camera = {}
+    total = {
+        "frames": 0,
+        "contact_kept": 0,
+        "noncontact_kept": 0,
+        "noncontact_dropped": 0,
+        "kept": 0,
+    }
+    for cam in camera_keys:
+        scores = np.asarray(std_cache[cam])
+        contact = scores > thr
+        noncontact = ~contact
+        roll = rng.rand(len(scores)) < keep_ratio
+        kept_noncontact = noncontact & roll
+        dropped_noncontact = noncontact & ~roll
+        counts = {
+            "frames": int(len(scores)),
+            "contact_kept": int(contact.sum()),
+            "noncontact_kept": int(kept_noncontact.sum()),
+            "noncontact_dropped": int(dropped_noncontact.sum()),
+        }
+        counts["kept"] = counts["contact_kept"] + counts["noncontact_kept"]
+        per_camera[cam] = counts
+        for key, value in counts.items():
+            total[key] += value
+    return {"per_camera": per_camera, "total": total}
+
+
+def print_contact_filter_summary(dataset_id, summary, thr, keep_ratio):
+    total = summary["total"]
+    dropped = total["noncontact_dropped"]
+    frames = total["frames"]
+    dropped_pct = 100.0 * dropped / frames if frames else 0.0
+    print(
+        f"[contact_filter] {dataset_id}: kept {total['kept']}/{frames} tactile images; "
+        f"filtered non-contact={dropped} ({dropped_pct:.2f}%) | "
+        f"contact kept={total['contact_kept']}, "
+        f"non-contact kept={total['noncontact_kept']} | "
+        f"thr={thr}, keep_ratio={keep_ratio}"
+    )
+    for cam, counts in summary["per_camera"].items():
+        cam_frames = counts["frames"]
+        cam_dropped = counts["noncontact_dropped"]
+        cam_pct = 100.0 * cam_dropped / cam_frames if cam_frames else 0.0
+        print(
+            f"[contact_filter]   {cam}: kept {counts['kept']}/{cam_frames}; "
+            f"filtered non-contact={cam_dropped} ({cam_pct:.2f}%)"
+        )
+
+
 class _DecodeProbe(Dataset):
     """Decode each frame once and emit it for every camera that kept it.
 

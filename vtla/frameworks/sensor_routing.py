@@ -53,9 +53,14 @@ class SensorRoutingMixin:
     """
 
     # --- camera routing ---
+    # top_camera_keys / wrist_camera_keys 均为列表，支持多路相机（如双臂 left/right wrist）。
     wrist_only: bool = False
-    top_camera_key: str = "observation.images.cam_top"
-    wrist_camera_key: str = "observation.images.cam_right_wrist"
+    top_camera_keys: list[str] = field(
+        default_factory=lambda: ["observation.images.cam_top"]
+    )
+    wrist_camera_keys: list[str] = field(
+        default_factory=lambda: ["observation.images.cam_right_wrist"]
+    )
 
     # --- tactile routing ---
     tactile_mode: str = "none"  # none | as_image | encode
@@ -103,8 +108,12 @@ class SensorRoutingMixin:
         return out
 
     def selected_camera_keys(self) -> list[str]:
-        """RGB cameras selected by ``wrist_only``."""
-        keys = [self.wrist_camera_key] if self.wrist_only else [self.top_camera_key, self.wrist_camera_key]
+        """RGB cameras selected by ``wrist_only`` (top/wrist 各可多路)。"""
+        keys = (
+            list(self.wrist_camera_keys)
+            if self.wrist_only
+            else list(self.top_camera_keys) + list(self.wrist_camera_keys)
+        )
         return self._dedupe(keys)
 
     def image_keys(self) -> list[str]:

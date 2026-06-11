@@ -9,7 +9,11 @@ import time
 
 from .config import get_args_parser
 from .data.contact import load_or_compute_contact_std
-from .data.frame_cache import build_frame_cache
+from .data.frame_cache import (
+    build_frame_cache,
+    print_contact_filter_summary,
+    summarize_contact_filter,
+)
 
 
 def main(args):
@@ -24,7 +28,7 @@ def main(args):
     for ds_id in args.dataset_ids:
         print(f"[process_data] dataset={ds_id}")
         if args.contact_filter:
-            load_or_compute_contact_std(
+            std_cache = load_or_compute_contact_std(
                 args.dataset_root,
                 ds_id,
                 args.camera_keys,
@@ -32,6 +36,19 @@ def main(args):
                 video_backend=args.video_backend,
                 num_workers=args.num_workers,
                 stride=args.contact_stride,
+            )
+            summary = summarize_contact_filter(
+                std_cache,
+                args.camera_keys,
+                args.contact_std_threshold,
+                args.noncontact_keep_ratio,
+                args.contact_seed,
+            )
+            print_contact_filter_summary(
+                ds_id,
+                summary,
+                args.contact_std_threshold,
+                args.noncontact_keep_ratio,
             )
         if args.frame_cache:
             build_frame_cache(

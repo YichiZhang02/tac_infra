@@ -2,7 +2,7 @@
 REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
 
 # ===================模型和数据集配置===================
-dataset_id=${1:-rm_nist_260320_strawberry}
+dataset_id=${1:-rm_umi_dual_pen_open}
 policy_type=${2:-starvla_groot}          # act | diffusion | pi05 | starvla_groot
 
 # 两个不同概念，按 policy_type 绑定：
@@ -30,8 +30,8 @@ log_freq=100
 # wrist_only: true 只用 wrist 相机; false 用 top + wrist
 # tactile_mode: none(触觉不进模型) / as_image(触觉作为图像输入) / encode(触觉 encoder, 预留未实现)
 # state_mode: none(完全不用 state) / joint(关节角) / ee(末端位姿，当前预留未实现)
-wrist_only=${6:-false}
-tactile_mode=${7:-none}
+wrist_only=${6:-true}
+tactile_mode=${7:-encode}
 state_mode=${8:-none}
 
 # tactile encoder（仅 tactile_mode=encode 时生效）
@@ -44,9 +44,15 @@ tactile_encoder_path=${TACTILE_ENCODER_PATH:-${9:-/mnt/data/xidong_data/tac_infr
 tactile_insert_location=${TACTILE_INSERT_LOCATION:-${10:-encoder}}
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-8}
 
-# 相机 key（按数据集命名调整）
-top_cam=${TOP_CAM:-observation.images.cam_top}
-wrist_cam=${WRIST_CAM:-observation.images.cam_right_wrist}
+# ===================相机 / 触觉 key（按数据集命名调整，均支持多路）===================
+# 三者都是 draccus 列表，语法为 [key1,key2,...]（无需给每个元素加引号）。
+# 可多路：如双臂数据 rm_umi_dual_pen_open 有 left/right 两路 wrist + 四路 finger。
+#   top_cam:      顶部/全景相机，可多路；wrist_only=true 时被忽略
+#   wrist_cam:    腕部相机，可多路（双臂 left+right）
+#   tactile_keys: 触觉图 key，可多路（tactile_mode=as_image/encode 时生效）
+top_cam=${TOP_CAM:-'[observation.images.cam_top]'}
+wrist_cam=${WRIST_CAM:-'[observation.images.left_cam_wrist,observation.images.right_cam_wrist]'}
+tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
 
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}"
 
@@ -105,6 +111,9 @@ echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
 echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode"
+echo "Top cam keys:   ${top_cam}"
+echo "Wrist cam keys: ${wrist_cam}"
+echo "Tactile keys:   ${tactile_keys}"
 if [ "${tactile_mode}" = "encode" ]; then
   echo "Tactile encoder path: ${tactile_encoder_path} | Insert: ${tactile_insert_location} | Num tokens: ${tactile_num_tokens} (encoder trained jointly)"
 fi
@@ -121,8 +130,9 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id accelerate la
     --policy.wrist_only=${wrist_only} \
     --policy.tactile_mode=${tactile_mode} \
     --policy.state_mode=${state_mode} \
-    --policy.top_camera_key=${top_cam} \
-    --policy.wrist_camera_key=${wrist_cam} \
+    --policy.top_camera_keys="${top_cam}" \
+    --policy.wrist_camera_keys="${wrist_cam}" \
+    --policy.tactile_keys="${tactile_keys}" \
     --policy.device=cuda \
     --policy.push_to_hub=false \
     ${extra_args} \

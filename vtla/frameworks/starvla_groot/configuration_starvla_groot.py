@@ -78,7 +78,7 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     state_dim: int | None = None
 
     # === Multi-view / tactile / state routing ===
-    # wrist_only / top_camera_key / wrist_camera_key / tactile_mode /
+    # wrist_only / top_camera_keys / wrist_camera_keys / tactile_mode /
     # tactile_keys / tactile_encoder_type / state_mode come from SensorRoutingMixin.
     empty_cameras: int = 0
     image_resolution: tuple[int, int] = (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE)

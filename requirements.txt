@@ -33,7 +33,10 @@ pyarrow==23.0.0
 # Modeling
 diffusers==0.35.2
 einops==0.8.1
+fla-core==0.5.0
+flash-linear-attention==0.5.0
 matplotlib==3.10.8
+ninja==1.13.0
 opencv-python-headless==4.12.0.88
 omegaconf==2.3.0
 safetensors==0.7.0
@@ -42,6 +45,7 @@ scipy==1.15.3
 timm==1.0.26
 tokenizers==0.22.2
 transformers @ git+https://github.com/huggingface/transformers.git@b665f3ab02a5b83eecc102079c4d86544e9d2d11
+causal_conv1d==1.6.2.post1
 
 # Config/serialization helpers used by the local LeRobot-style framework
 deepdiff==8.6.1
@@ -57,7 +61,3 @@ pynput==1.8.1
 pyserial==3.5
 pyudev==0.24.4
 rerun-sdk==0.26.2
-
-# External project dependency.
-# If you already install LeRobot another way, remove this line.
-# -e git+https://github.com/huggingface/lerobot.git@0f551df8f4bad4c504e395ea3df74fc5f714016f#egg=lerobot

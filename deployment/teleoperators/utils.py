@@ -36,6 +36,10 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .realman_rm75b_leader import RealmanRM75bLeader
 
         return RealmanRM75bLeader(config)
+    elif config.type == "bi_realman_ugripper_leader":
+        from .bi_realman_ugripper_leader import BiRealmanUGripperLeader
+
+        return BiRealmanUGripperLeader(config)
     else:
         try:
             return cast(Teleoperator, make_device_from_device_class(config))

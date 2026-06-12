@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,9 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""仅保留 hd 适配器复用的夹爪与主臂通信类。"""
+from .bi_realman_ugripper_leader import BiRealmanUGripperLeader
+from .config_bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
 
-from .gripper import Gripper
-from .leader_arm import LeaderArm
-
-__all__ = ["Gripper", "LeaderArm"]
+__all__ = ["BiRealmanUGripperLeaderConfig", "BiRealmanUGripperLeader"]

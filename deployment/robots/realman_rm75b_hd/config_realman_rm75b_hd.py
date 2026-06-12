@@ -15,38 +15,34 @@
 # limitations under the License.
 
 """
-睿尔曼 RM75b 机械臂配置类 (Shear+Depth 触觉传感器 HD 高清版)
+睿尔曼 RM75b 机械臂配置类 (HD 高清版，无触觉传感器)
 
-该配置支持主从控制模式，并集成 Shear+Depth 触觉传感器：
+基于 realman_tactile_shandd_hd，但去掉触觉传感器。
+
+特性:
 - 主臂（Leader）: 通过 USB 连接到电脑
 - 从臂（Follower）: 通过网线 TCP/IP 连接（默认 192.168.1.201:8080）
 - 夹爪: 舵机通过 USB 单独连接
 - 相机: 手腕相机和全景相机通过 USB 连接
-- 触觉传感器: 两个触觉传感器，输出 Shear+Depth RGB 图像
 
 HD 版本特性:
-- cam_top 全景相机使用 1920x1080 分辨率
-- ROI 裁剪输出 480x360 (与标清版相同)
-
-触觉传感器输出格式:
-- 通道 0 (B): shear_x (X方向剪切力), 归一化范围 [-5, +5] -> [0, 255]
-- 通道 1 (G): shear_y (Y方向剪切力), 归一化范围 [-5, +5] -> [0, 255]
-- 通道 2 (R): depth (接触深度), 归一化范围 [0, 4] -> [0, 255]
+- cam_top 全景相机使用 1920x1080 分辨率，ROI 裁剪输出 896x896 正方形
+- cam_right_wrist 使用 640x480 分辨率，ROI 裁剪输出 480x480 正方形
 """
 
 from dataclasses import dataclass, field
 
-from deployment.cameras import CameraConfig
-from deployment.cameras.opencv import OpenCVCameraConfig
+from lerobot.cameras import CameraConfig
+from lerobot.cameras.opencv import OpenCVCameraConfig
+from lerobot.cameras.opencv.configuration_opencv import Cv2Rotation
 
 from ..config import RobotConfig
-from ..realman_tactile_shandd.tactile_sensor_feat import TactileSensorFeatConfig
 
 
-@RobotConfig.register_subclass("realman_tactile_shandd_hd")
+@RobotConfig.register_subclass("realman_rm75b_hd")
 @dataclass
-class RealmanTactileShanddHdConfig(RobotConfig):
-    """睿尔曼 RM75b 机械臂配置类 (Shear+Depth 触觉传感器 HD 高清版)
+class RealmanRM75bHdConfig(RobotConfig):
+    """睿尔曼 RM75b 机械臂配置类 (HD 高清版，无触觉传感器)
     
     Attributes:
         leader_port: 主臂 USB 串口路径
@@ -57,7 +53,6 @@ class RealmanTactileShanddHdConfig(RobotConfig):
         disable_torque_on_disconnect: 断开连接时是否禁用力矩
         max_relative_target: 相对目标位置的最大值（安全限制）
         cameras: 相机配置字典
-        tactile_sensors: 触觉传感器配置字典 (Shear+Depth 模式)
     """
     
     # ============ 主臂配置（Leader - USB 串口） ============
@@ -77,7 +72,20 @@ class RealmanTactileShanddHdConfig(RobotConfig):
     gripper_motor_model: str = "sts3215"
     gripper_open: float = -2.3562
     gripper_close: float = -0.198
-    
+
+    # ============ 被夹物体配置 ============
+    object: str = ""
+    gripper_object_min_open: dict[str, float] = field(
+        default_factory=lambda: {
+            "eraser": 0.5800,
+            "plug":   0.3300,
+            "gear1":  0.1800,
+            "gear2":  0.1400,
+            "pen":    0.0400,
+            "usb":    0.0100,
+        }
+    )
+
     # ============ 安全与控制配置 ============
     disable_torque_on_disconnect: bool = True
     max_relative_target: float | dict[str, float] | None = None
@@ -87,48 +95,19 @@ class RealmanTactileShanddHdConfig(RobotConfig):
         default_factory=lambda: {
             # 手腕相机 (D405)
             "cam_right_wrist": OpenCVCameraConfig(
-                index_or_path=4,  # 注意: 索引可能因 USB 重插而变化
+                index_or_path=12,  
                 fps=30,
                 width=640,
                 height=480,
+                rotation=Cv2Rotation.ROTATE_180,  # 相机倒装，旋转180度
             ),
             # 全景相机 (D515 RGB流) - HD 1920x1080
-            # 代码中会做 ROI 裁剪，输出仍为 480x360
+            # 代码中会做 ROI 裁剪，输出 896x896 正方形
             "cam_top": OpenCVCameraConfig(
-                index_or_path=16,
+                index_or_path=6,
                 fps=30,
                 width=1920,    # HD 分辨率
                 height=1080,   # HD 分辨率
-            ),
-        }
-    )
-    
-    # ============ 触觉传感器配置 (Shear+Depth 模式) ============
-    # 输出 RGB 图像: (H, W, 3), 其中 B=shear_x, G=shear_y, R=depth
-    tactile_sensors: dict[str, TactileSensorFeatConfig] = field(
-        default_factory=lambda: {
-            # 触觉传感器 0 - 序列号 M2505150275
-            "cam_finger0": TactileSensorFeatConfig(
-                device_id=6,  # 使用 index
-                fps=30,
-                width=320,    # getFeat 输出尺寸
-                height=240,
-                # 归一化参数
-                shear_min=-5.0,
-                shear_max=5.0,
-                depth_min=0.0,
-                depth_max=4.0,
-            ),
-            # 触觉传感器 1 - 序列号 M2505150108
-            "cam_finger1": TactileSensorFeatConfig(
-                device_id=8,  # 使用 index
-                fps=30,
-                width=320,
-                height=240,
-                shear_min=-5.0,
-                shear_max=5.0,
-                depth_min=0.0,
-                depth_max=4.0,
             ),
         }
     )

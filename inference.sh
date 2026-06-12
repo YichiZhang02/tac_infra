@@ -12,11 +12,11 @@
 #            local/eval_pick "Grab the cube" 10
 # ============================================================================
 set -e
-REPO_ROOT=/mnt/data/xidong_data/tac_infra        # 需调整为实际路径
+REPO_ROOT=~/yichi/tac_infra        # 需调整为实际路径
 cd "${REPO_ROOT}"
 
 # =================== 可调参数 ===================
-policy_path=${1:-"/mnt/data/xidong_data/tac_infra/playground/results/models/rm_umi_dual_pen_open_starvla_groot_wristonly_true_tactile_encode_state_joint/checkpoints/last/pretrained_model"}
+policy_path=${1:-"/mnt/data/xidong_data/tac_infra/playground/results/models/rm_umi_dual_pen_open_pi05_wristonly_true_tactile_encode_state_joint/checkpoints/last/pretrained_model"}
 
 # --- 从 policy_path 自动推导一个可读的录制标签 ---
 # 例: playground/results/models/<model_tag>/checkpoints/<ckpt_tag>/pretrained_model

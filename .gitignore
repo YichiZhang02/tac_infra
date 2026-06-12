@@ -33,3 +33,10 @@ playground/results/**
 
 __pycache__/
 .cache/
+
+# Vendored hardware SDKs (large binaries, kept locally only)
+deployment/sdk/
+
+# Runtime logs from tactile / device clients
+**/logs/*.log
+**/logs_pc_flux/*.log

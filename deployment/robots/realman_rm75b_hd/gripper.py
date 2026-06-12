@@ -29,8 +29,8 @@ from typing import Any
 
 import numpy as np
 
-from deployment.motors import Motor, MotorNormMode
-from deployment.motors.feetech import FeetechMotorsBus
+from lerobot.motors import Motor, MotorNormMode
+from lerobot.motors.feetech import FeetechMotorsBus
 
 logger = logging.getLogger(__name__)
 

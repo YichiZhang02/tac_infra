@@ -15,27 +15,23 @@
 # limitations under the License.
 
 """
-睿尔曼 RM75b 机械臂 LeRobot 适配器 (Shear+Depth 触觉传感器 HD 高清版)
+睿尔曼 RM75b 机械臂 LeRobot 适配器 (HD 高清版，无触觉传感器)
 
-该适配器支持主从控制模式，并集成 Shear+Depth 触觉传感器：
+基于 realman_tactile_shandd_hd，但去掉触觉传感器。
+
+该适配器支持主从控制模式：
 - 主臂（Leader）: 用于遥操作，读取位置作为目标
 - 从臂（Follower）: 执行动作，跟随主臂运动
 - 夹爪: 独立舵机控制
 - 相机: 多相机图像采集
-- 触觉传感器: 使用 getFeat() 获取 shear+depth 数据，合并为 RGB 图像
 
 HD 版本特性:
 - cam_top 全景相机使用 1920x1080 分辨率
-- ROI 裁剪输出 480x360 (与标清版相同)
-
-触觉传感器输出格式:
-- 通道 0 (B): shear_x (X方向剪切力)
-- 通道 1 (G): shear_y (Y方向剪切力)
-- 通道 2 (R): depth (接触深度)
+- ROI 裁剪输出 896x896 正方形 (1:1 画幅)
+- cam_right_wrist 输出 480x480 正方形
 
 优化特性:
 - 异步读取从臂状态 (解决 rm_get_joint_degree ~50ms 延迟问题)
-- 异步读取触觉传感器 getFeat 数据
 - 支持 30Hz 数据采集频率
 """
 
@@ -50,21 +46,20 @@ from typing import Any
 import cv2
 import numpy as np
 
-from deployment.cameras.utils import make_cameras_from_configs
-from deployment.motors import MotorCalibration
-from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot.motors import MotorCalibration
+from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_realman_tactile_shandd_hd import RealmanTactileShanddHdConfig
-from ..realman_tactile_shandd.tactile_sensor_feat import TactileSensorFeat, TactileSensorFeatConfig, make_tactile_sensors_feat_from_configs
+from .config_realman_rm75b_hd import RealmanRM75bHdConfig
 
-# 复用 realman_rm75b_tactile 中的组件
-from ..realman_rm75b_tactile.gripper import Gripper
-from ..realman_rm75b_tactile.leader_arm import LeaderArm
+# 本地组件
+from .gripper import Gripper
+from .leader_arm import LeaderArm
 
-# 添加 Robotic_Arm SDK 路径 (deployment/sdk，使仓库自包含)
-sys.path.append(str(Path(__file__).resolve().parents[2] / "sdk"))
+# 添加 Robotic_Arm SDK 路径
+sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +139,8 @@ class AsyncFollowerStateReader(threading.Thread):
             except Exception as e:
                 logger.debug(f"异步读取从臂状态错误: {e}")
             
-            # 最小化等待，实际频率受限于 rm_get_joint_degree() ~50ms 延迟
-            # 理论最高频率: 1000ms / 50ms = 20Hz
-            time.sleep(0.001)
+            # 控制读取频率 (~20Hz)
+            time.sleep(0.01)
     
     def get_state(self) -> tuple[list[float], float]:
         """获取缓存的从臂状态"""
@@ -163,29 +157,26 @@ class AsyncFollowerStateReader(threading.Thread):
         self.running = False
 
 
-class RealmanTactileShanddHd(Robot):
+class RealmanRM75bHd(Robot):
     """
-    睿尔曼 RM75b 机械臂 (Shear+Depth 触觉传感器 HD 高清版) - LeRobot 兼容实现
+    睿尔曼 RM75b 机械臂 (HD 高清版，无触觉传感器) - LeRobot 兼容实现
     
     支持主从控制模式，适用于遥操作数据采集和策略部署。
-    触觉传感器使用 getFeat() 获取 shear+depth 数据，输出 RGB 图像。
     
     HD 版本特性:
-    - cam_top 使用 1920x1080 分辨率，ROI 裁剪为 1:1 正方形 (1080x1080)
+    - cam_top 使用 1920x1080 分辨率，ROI 裁剪为 1:1 正方形 (896x896)
     - cam_right_wrist 使用 640x480 分辨率，ROI 裁剪为 1:1 正方形 (480x480)
-    - 所有相机输出 480x480 正方形画幅，充分利用 Pi0 的 224x224 输入
+    - 所有相机输出正方形画幅，充分利用 Pi0 的 224x224 输入
     
     数据格式:
     - observation.state: [8] (7关节 + 1夹爪，弧度)
     - observation.images.cam_right_wrist: [480, 480, 3] (RGB, 正方形)
-    - observation.images.cam_top: [540, 540, 3] (RGB, 正方形, HD)
-    - observation.images.cam_finger0: [240, 320, 3] (Shear+Depth RGB)
-    - observation.images.cam_finger1: [240, 320, 3] (Shear+Depth RGB)
+    - observation.images.cam_top: [896, 896, 3] (RGB, 正方形, HD)
     - action: [8] (7关节 + 1夹爪，弧度)
     """
 
-    config_class = RealmanTactileShanddHdConfig
-    name = "realman_tactile_shandd_hd"
+    config_class = RealmanRM75bHdConfig
+    name = "realman_rm75b_hd"
     
     # RM75b 是 7 自由度机械臂
     DOF = 7
@@ -204,7 +195,7 @@ class RealmanTactileShanddHd(Robot):
     # 夹爪名称
     GRIPPER_NAME = "main_gripper"
 
-    def __init__(self, config: RealmanTactileShanddHdConfig):
+    def __init__(self, config: RealmanRM75bHdConfig):
         super().__init__(config)
         self.config = config
         
@@ -227,9 +218,6 @@ class RealmanTactileShanddHd(Robot):
         
         # 相机
         self.cameras = make_cameras_from_configs(config.cameras)
-        
-        # 触觉传感器 (Shear+Depth 模式)
-        self.tactile_sensors = make_tactile_sensors_feat_from_configs(config.tactile_sensors)
         
         # 连接状态
         self._leader_connected = False
@@ -265,13 +253,13 @@ class RealmanTactileShanddHd(Robot):
         """相机特征 (RGB 相机)
         
         HD 版本: 所有相机输出 1:1 正方形画幅
-        - cam_top: 480x480
+        - cam_top: 896x896
         - cam_right_wrist: 480x480
         """
         features = {}
         for cam in self.cameras:
             if cam == "cam_top":
-                # 1920x1080 -> ROI 1080x1080 -> resize 480x480
+                # 1920x1080 -> ROI 896x896 (无需 resize)
                 features[cam] = (CAM_TOP_ROI_OUTPUT_SIZE, CAM_TOP_ROI_OUTPUT_SIZE, 3)
             elif cam == "cam_right_wrist":
                 # 640x480 -> ROI 480x480 (无需 resize)
@@ -282,18 +270,10 @@ class RealmanTactileShanddHd(Robot):
                 features[cam] = (h, w, 3)
         return features
 
-    @property
-    def _tactile_ft(self) -> dict[str, tuple]:
-        """触觉传感器特征 (Shear+Depth RGB 格式)"""
-        return {
-            name: (config.height, config.width, 3) 
-            for name, config in self.config.tactile_sensors.items()
-        }
-
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        """观测特征：包括关节位置、相机图像和触觉图像"""
-        return {**self._motors_ft, **self._cameras_ft, **self._tactile_ft}
+        """观测特征：包括关节位置和相机图像"""
+        return {**self._motors_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -306,8 +286,7 @@ class RealmanTactileShanddHd(Robot):
     def is_connected(self) -> bool:
         """检查所有设备是否已连接"""
         cameras_connected = all(cam.is_connected for cam in self.cameras.values())
-        tactile_connected = all(sensor.is_connected for sensor in self.tactile_sensors.values())
-        return self._follower_connected and cameras_connected and tactile_connected
+        return self._follower_connected and cameras_connected
 
     # ==================== 连接/断开 ====================
     
@@ -347,25 +326,19 @@ class RealmanTactileShanddHd(Robot):
             cam.connect()
             logger.info(f"相机 {cam_name} 连接成功")
 
-        # 5. 连接触觉传感器 (Shear+Depth 模式)
-        for sensor_name, sensor in self.tactile_sensors.items():
-            logger.info(f"正在连接触觉传感器 {sensor_name} (Shear+Depth 模式)...")
-            sensor.connect()
-            logger.info(f"触觉传感器 {sensor_name} 连接成功")
-
-        # 6. 启动异步从臂状态读取器
+        # 5. 启动异步从臂状态读取器
         self._start_async_state_reader()
 
-        # 7. 校准
+        # 6. 校准
         if not self.is_calibrated and calibrate:
             logger.info("未找到校准数据，开始校准...")
             self.calibrate()
 
-        # 8. 配置
+        # 7. 配置
         self.configure()
         
         time.sleep(0.5)
-        logger.info(f"{self} 连接完成 (HD 模式, 触觉模式: Shear+Depth)")
+        logger.info(f"{self} 连接完成 (HD 模式，无触觉传感器)")
 
     def _connect_leader(self) -> None:
         """连接主臂"""
@@ -495,14 +468,6 @@ class RealmanTactileShanddHd(Robot):
             except Exception as e:
                 logger.warning(f"断开相机 {cam_name} 时出错: {e}")
 
-        # 断开触觉传感器
-        for sensor_name, sensor in self.tactile_sensors.items():
-            try:
-                sensor.disconnect()
-                logger.info(f"触觉传感器 {sensor_name} 已断开")
-            except Exception as e:
-                logger.warning(f"断开触觉传感器 {sensor_name} 时出错: {e}")
-
         logger.info(f"{self} 已断开所有连接")
 
     # ==================== 校准 ====================
@@ -605,14 +570,10 @@ class RealmanTactileShanddHd(Robot):
 
     def get_observation(self) -> dict[str, Any]:
         """
-        读取当前观测：关节位置 + 相机图像 + 触觉图像 (Shear+Depth)
+        读取当前观测：关节位置 + 相机图像
         
         Returns:
             dict: 包含所有传感器数据的字典
-                 触觉传感器返回 (H, W, 3) RGB 图像:
-                 - B: shear_x
-                 - G: shear_y
-                 - R: depth
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} 未连接")
@@ -663,7 +624,7 @@ class RealmanTactileShanddHd(Robot):
             
             # 对相机做 1:1 正方形 ROI 裁剪
             if cam_key == "cam_top" and image is not None:
-                # 1920x1080 -> 1080x1080 -> 480x480
+                # 1920x1080 -> 896x896
                 image = self._process_cam_top_image(image)
             elif cam_key == "cam_right_wrist" and image is not None:
                 # 640x480 -> 480x480
@@ -672,14 +633,6 @@ class RealmanTactileShanddHd(Robot):
             obs_dict[cam_key] = image
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"读取相机 {cam_key}: {dt_ms:.1f}ms")
-
-        # 4. 读取触觉传感器图像 (Depth+Shear RGB)
-        for sensor_key, sensor in self.tactile_sensors.items():
-            start = time.perf_counter()
-            # 返回 (H, W, 3) RGB 图像: R=depth,B=shear_x, G=shear_y, 
-            obs_dict[sensor_key] = sensor.async_read()
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"读取触觉传感器 {sensor_key}: {dt_ms:.1f}ms")
 
         return obs_dict
 
@@ -732,6 +685,22 @@ class RealmanTactileShanddHd(Robot):
         # 5. 发送夹爪动作
         gripper_pos = action.get(self.GRIPPER_NAME, None)
         if gripper_pos is not None and self._gripper is not None and self._gripper_connected:
+            obj = getattr(self.config, "object", "") or ""
+            obj_limits = getattr(self.config, "gripper_object_min_open", {}) or {}
+            if obj and obj in obj_limits:
+                limit = float(obj_limits[obj])
+                if -1.309 <= limit <= 1.309:
+                    if float(gripper_pos) < limit:
+                        logger.debug(
+                            f"夹爪目标 {float(gripper_pos):.4f} 低于物体 '{obj}' "
+                            f"的最小开合下限 {limit:.4f}，已裁剪"
+                        )
+                        gripper_pos = limit
+                else:
+                    logger.warning(
+                        f"忽略 gripper_object_min_open['{obj}']={limit:.4f}：超出"
+                        f"物理可写范围 [-1.309, 1.309]"
+                    )
             start = time.perf_counter()
             self._gripper.write_position(gripper_pos)
             dt_ms = (time.perf_counter() - start) * 1e3

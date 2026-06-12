@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""睿尔曼触觉传感器 (Shear+Depth, uint8) - 仅保留 TactileSensorFeat 供 hd 适配器复用。"""
+"""
+睿尔曼 RM75b 机械臂 - HD 高清版（无触觉传感器）
 
-from .tactile_sensor_feat import (
-    TactileSensorFeat,
-    TactileSensorFeatConfig,
-    make_tactile_sensors_feat_from_configs,
-)
+基于 realman_tactile_shandd_hd，但去掉触觉传感器。
+输出正方形画幅相机图像。
+"""
+
+from .config_realman_rm75b_hd import RealmanRM75bHdConfig
+from .realman_rm75b_hd import RealmanRM75bHd
 
 __all__ = [
-    "TactileSensorFeat",
-    "TactileSensorFeatConfig",
-    "make_tactile_sensors_feat_from_configs",
+    "RealmanRM75bHdConfig",
+    "RealmanRM75bHd",
 ]

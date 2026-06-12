@@ -1,0 +1,4 @@
+1 重构 deployment
+2 将tactile_encoder改为model.tactile_encoder
+3 动作改为可选择 joint delta_ee related_ee
+4 state兼容ee

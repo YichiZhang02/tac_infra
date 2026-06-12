@@ -40,11 +40,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# lingkong_grip_api.py + grpc_client.py 所在目录 (tac_infra 自包含, 放在 deployment/sdk 下)
+# 领控电爪客户端包 dm_lingkong_grip_sdk 所在目录 (tac_infra 自包含, 放在 deployment/sdk 下)
 # 本文件: .../tac_infra/deployment/robots/realman_ugripper_dual/lingkong_gripper.py
 #   parents[2] = .../tac_infra/deployment
-# 部署到真机时需将领控电爪客户端放在 deployment/sdk/lingkong_grip_api/
-_GRIP_API_DIR = Path(__file__).resolve().parents[2] / "sdk" / "lingkong_grip_api"
+# 包结构: deployment/sdk/dm_lingkong_grip/dm_lingkong_grip_sdk/ (内部用相对导入, 须作为包导入)
+_GRIP_API_DIR = Path(__file__).resolve().parents[2] / "sdk" / "dm_lingkong_grip"
 
 
 class LingkongGripper:
@@ -97,7 +97,7 @@ class LingkongGripper:
             sys.path.insert(0, str(_GRIP_API_DIR))
 
         try:
-            from lingkong_grip_api import LingkongGrip
+            from dm_lingkong_grip_sdk import LingkongGrip
         except ImportError as e:
             logger.error(f"无法导入 LingkongGrip ({_GRIP_API_DIR}): {e}")
             return False

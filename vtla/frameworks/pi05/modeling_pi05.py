@@ -1065,12 +1065,17 @@ class PI05Policy(PreTrainedPolicy):
             # First, fix any key differences (see openpi model.py, _fix_pytorch_state_dict_keys)
             fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
 
-            # Then add "model." prefix for all keys that don't already have it
+            # Then add "model." prefix for the core OpenPI weights, which are stored
+            # without it but live under `self.model`. Top-level sibling modules
+            # (e.g. `self.tactile_encoder`) keep their own prefix and must NOT be
+            # pushed under "model." — otherwise their keys all show up as
+            # missing/unexpected and silently fail to load.
+            top_level_prefixes = ("model.", "tactile_encoder.")
             remapped_state_dict = {}
             remap_count = 0
 
             for key, value in fixed_state_dict.items():
-                if not key.startswith("model."):
+                if not key.startswith(top_level_prefixes):
                     new_key = f"model.{key}"
                     remapped_state_dict[new_key] = value
                     remap_count += 1

@@ -23,15 +23,10 @@ from .robot import Robot
 
 
 def make_robot_from_config(config: RobotConfig) -> Robot:
-    if config.type == "realman_tactile_shandd_hd":
-        from .realman_tactile_shandd_hd import RealmanTactileShanddHd
-
-        return RealmanTactileShanddHd(config)
-    else:
-        try:
-            return cast(Robot, make_device_from_device_class(config))
-        except Exception as e:
-            raise ValueError(f"Error creating robot with config {config}: {e}") from e
+    try:
+        return cast(Robot, make_device_from_device_class(config))
+    except Exception as e:
+        raise ValueError(f"Error creating robot with config {config}: {e}") from e
 
 
 # TODO(pepijn): Move to pipeline step to make sure we don't have to do this in the robot code and send action to robot is clean for use in dataset

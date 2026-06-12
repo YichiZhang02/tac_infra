@@ -20,8 +20,8 @@
 示例 - 遥操作采数据 (睿尔曼 RM75b + 触觉):
 ```shell
 python -m deployment.record \
-    --robot.type=realman_tactile_shandd_hd \
-    --robot.id=realman_right \
+    --robot.type=realman_ugripper_dual \
+    --robot.id=realman_dual \
     --teleop.type=realman_rm75b_leader \
     --teleop.port=/dev/ttyLeaderR \
     --dataset.repo_id=local/my_dataset \
@@ -33,8 +33,8 @@ python -m deployment.record \
 示例 - 用策略控制 (模型推理):
 ```shell
 python -m deployment.record \
-    --robot.type=realman_tactile_shandd_hd \
-    --robot.id=realman_right \
+    --robot.type=realman_ugripper_dual \
+    --robot.id=realman_dual \
     --policy.path=playground/results/models/xxx/checkpoints/last/pretrained_model \
     --dataset.repo_id=local/eval_dataset \
     --dataset.num_episodes=10 \
@@ -87,12 +87,12 @@ from deployment.cameras import CameraConfig  # noqa: F401
 from deployment.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from deployment.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from deployment.robots import Robot, RobotConfig, make_robot_from_config
-from deployment.robots.realman_tactile_shandd_hd import RealmanTactileShanddHd  # noqa: F401  注册 config 选项
 from deployment.robots.realman_ugripper_dual import RealmanUGripperDual  # noqa: F401  注册 config 选项
 from deployment.robots.realman_ugripper_dual_notac import RealmanUGripperDualNotac  # noqa: F401  注册 config 选项
 from deployment.robots.realman_ugripper_dual_notop_notac import RealmanUGripperDualNotopNotac  # noqa: F401  注册 config 选项
 from deployment.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
 from deployment.teleoperators.realman_rm75b_leader import RealmanRM75bLeader  # noqa: F401  注册 config 选项
+from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeader  # noqa: F401  注册 config 选项
 
 # ---- 策略 / 数据集 / 处理管线 (复用本仓库 vtla) ----
 from vtla.engine.configs import parser

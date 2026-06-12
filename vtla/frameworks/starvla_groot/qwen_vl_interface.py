@@ -303,9 +303,17 @@ class QwenVLInterface(nn.Module):
         pixel_values, image_grid_thw = self.gpu_pixel_values(flat)
         input_ids, attention_mask = self.build_text_inputs(instructions, num_views)
 
+        # Qwen3.5 forward requires mm_token_type_ids (image=1, video=2, text=0) whenever
+        # image_grid_thw is supplied, so M-RoPE can be computed. The processor normally
+        # returns it; reproduce it here (no video tokens -> only image=1). Matches the
+        # processor output exactly (mm==1 iff input_ids == image_pad).
+        image_token_id = self.model.config.image_token_id
+        mm_token_type_ids = (input_ids == image_token_id).long()
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
+            "mm_token_type_ids": mm_token_type_ids,
             "pixel_values": pixel_values.to(self.model.device),
             "image_grid_thw": image_grid_thw.to(self.model.device),
         }

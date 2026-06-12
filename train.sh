@@ -20,10 +20,10 @@ case "${policy_type}" in
 esac
 # ===================训练配置===================
 gpu_id=0,1,2,3
-num_processes=${3:-1}
+num_processes=${3:-4}
 batch_size=${4:-16}
 steps=${5:-5_000}
-save_freq=${steps}
+save_freq=5_000
 log_freq=100
 
 # ===================视觉/触觉路由（四个 framework 通用）===================
@@ -32,7 +32,7 @@ log_freq=100
 # state_mode: none(完全不用 state) / joint(关节角) / ee(末端位姿，当前预留未实现)
 wrist_only=${6:-true}
 tactile_mode=${7:-encode}
-state_mode=${8:-none}
+state_mode=${8:-joint}
 
 # tactile encoder（仅 tactile_mode=encode 时生效）
 #   tactile_encoder_path: tactile-MAE 权重（.pth）或 HF 目录，作为 encoder 初始化；
@@ -40,7 +40,7 @@ state_mode=${8:-none}
 #     注意：encode 模式下 tactile-MAE encoder + query token 会随 policy 一起训练（非冻结）。
 #   tactile_insert_location: encoder | decoder（Diffusion 忽略该项）。
 #   tactile_num_tokens: 每张触觉图的可学习 query token 数（默认 8）；总 token = 指数 × 该值。
-tactile_encoder_path=${TACTILE_ENCODER_PATH:-${9:-/mnt/data/xidong_data/tac_infra/playground/pretrained_models/AnyTouch-ViT-L-16}}
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${9:-playground/pretrained_models/AnyTouch-ViT-L-16}}
 tactile_insert_location=${TACTILE_INSERT_LOCATION:-${10:-encoder}}
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-8}
 

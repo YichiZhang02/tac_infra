@@ -43,7 +43,8 @@ class LeRobotTactileDataset(Dataset):
                  tolerance_s=0.1, video_backend="pyav", return_meta=False,
                  contact_filter=False, contact_std_threshold=0.5,
                  noncontact_keep_ratio=0.05, contact_seed=0, contact_num_workers=8,
-                 contact_stride=1, frame_cache=True, image_size=224):
+                 contact_stride=1, frame_cache=True, image_size=224,
+                 raw_frame_cache=False):
         if isinstance(dataset_ids, str):
             dataset_ids = [dataset_ids]
         if isinstance(camera_keys, str):
@@ -53,7 +54,14 @@ class LeRobotTactileDataset(Dataset):
         self.sensor_id = int(sensor_id)
         self.return_meta = return_meta
         self.transform = transform if transform is not None else build_transform(split == "train")
-        self.frame_cache = frame_cache
+        # raw_frame_cache implies frame_cache (it is a pre-built cache, read directly)
+        self.frame_cache = frame_cache or raw_frame_cache
+
+        if raw_frame_cache:
+            self._init_raw_frame_cache(dataset_root, dataset_ids, split, val_ratio,
+                                       contact_filter, contact_std_threshold,
+                                       noncontact_keep_ratio, contact_seed, image_size)
+            return
 
         if frame_cache:
             self._init_frame_cache(dataset_root, dataset_ids, split, val_ratio,
@@ -168,6 +176,38 @@ class LeRobotTactileDataset(Dataset):
         if not self.index:
             raise RuntimeError("Empty dataset (frame_cache). Check dataset_ids / val_ratio / split.")
         print(f"[frame_cache] {split}: {len(self.index)} samples from {dataset_ids} (sig={sig})")
+
+    def _init_raw_frame_cache(self, dataset_root, dataset_ids, split, val_ratio,
+                              contact_filter, contact_std_threshold,
+                              noncontact_keep_ratio, contact_seed, image_size):
+        """Read a pre-built frame cache directly — no LeRobot dataset required.
+
+        For caches produced by ``tools/png_to_frame_cache.py`` (a flat image stream
+        with no episodes). train/val is split by contiguous row ranges per camera
+        instead of by episode: the last ``val_ratio`` fraction of rows is held out.
+        """
+        from .frame_cache import cache_signature, load_frame_cache
+        sig = cache_signature(contact_filter, contact_std_threshold,
+                              noncontact_keep_ratio, contact_seed, image_size)
+        self.frames = {}   # (sub_idx, cam) -> uint8 memmap [K, S, S, 3]
+        self.index = []    # (sub_idx, cam, row)
+        for sub_idx, ds_id in enumerate(dataset_ids):
+            cache = load_frame_cache(dataset_root, ds_id, self.camera_keys, sig)
+            for cam in self.camera_keys:
+                arr, _kept_abs = cache[cam]
+                self.frames[(sub_idx, cam)] = arr
+                k = len(arr)
+                n_val = round(k * val_ratio) if val_ratio > 0 else 0
+                n_val = min(n_val, k)
+                rows = (range(k - n_val, k) if split == "val"
+                        else range(0, k - n_val))
+                for row in rows:
+                    self.index.append((sub_idx, cam, row))
+        if not self.index:
+            raise RuntimeError(
+                f"Empty raw frame cache (sig={sig}). Check dataset_ids / camera_keys / "
+                f"val_ratio, and that the cache was built (tools/png_to_frame_cache.py).")
+        print(f"[raw_frame_cache] {split}: {len(self.index)} samples from {dataset_ids} (sig={sig})")
 
     @staticmethod
     def _split_episodes(total_ep, split, val_ratio):

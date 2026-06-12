@@ -18,8 +18,8 @@
 When ``tactile_mode="encode"``, each policy owns one ``TactileEncoder``. It wraps the
 tactile-MAE feature extractor (``vtla.tac_encoder.tactile_mae.inference``), which emits
 ``N = tactile_num_tokens`` learnable query tokens per tactile image, plus a trainable
-projection that maps them into the policy's token space. Each tactile key (finger) is
-encoded with a separate forward, so the total number of tactile tokens is
+projection that maps them into the policy's token space. All tactile keys (fingers) are
+encoded in a single batched forward, so the total number of tactile tokens is
 ``n_keys * N``.
 
 The encoder weights / arch / sensor_id / image_size are loaded automatically from
@@ -60,6 +60,8 @@ class TactileEncoder(nn.Module):
         )
         self.output_dim = int(output_dim)
         self.proj = nn.Linear(self.extractor.feature_dim, self.output_dim)
+        if self.extractor.compute_dtype is not None:
+            self.proj.to(dtype=self.extractor.compute_dtype)
 
     @property
     def feature_dim(self) -> int:
@@ -82,14 +84,35 @@ class TactileEncoder(nn.Module):
             )
 
         device = self.proj.weight.device
-        feats = []
+        n_keys = len(self.tactile_keys)
+
+        imgs = []
         for key in self.tactile_keys:
             img = batch[key]
             if img.device != device:
                 img = img.to(device)
-            feat = self.extractor(img)          # [B, N, D] or [B, T, N, D]
-            feat = self.proj(feat)              # [B, N, P] or [B, T, N, P]
-            feats.append(feat)
+            imgs.append(img)
 
-        # Concatenate all keys' query tokens along the token dimension.
-        return torch.cat(feats, dim=-2)          # [B, n_keys*N, P] or [B, T, n_keys*N, P]
+        # Stack every tactile key and run the MAE encoder a *single* time (keys folded
+        # into the batch dim) instead of one forward per key. Token ordering matches the
+        # old per-key concat: key0's N query tokens, then key1's, ... along the token dim.
+        sample = imgs[0]
+        if sample.dim() == 4:                              # [B, C, H, W] per key
+            stacked = torch.stack(imgs, dim=1)             # [B, n_keys, C, H, W]
+            feat = self.extractor(stacked)                 # [B, n_keys, N, D]
+            b, _, n, d = feat.shape
+            feat = feat.reshape(b, n_keys * n, d)          # [B, n_keys*N, D]
+        elif sample.dim() == 5:                            # [B, T, C, H, W] per key
+            b, t = sample.shape[:2]
+            stacked = torch.stack(imgs, dim=1)             # [B, n_keys, T, C, H, W]
+            flat = stacked.reshape(b * n_keys, t, *sample.shape[2:])
+            feat = self.extractor(flat)                    # [B*n_keys, T, N, D]
+            n, d = feat.shape[-2:]
+            feat = feat.reshape(b, n_keys, t, n, d)
+            feat = feat.permute(0, 2, 1, 3, 4).reshape(b, t, n_keys * n, d)  # [B, T, n_keys*N, D]
+        else:
+            raise ValueError(
+                f"TactileEncoder expects 4D or 5D tactile tensors, got shape {tuple(sample.shape)}"
+            )
+
+        return self.proj(feat)                              # [B, n_keys*N, P] or [B, T, n_keys*N, P]

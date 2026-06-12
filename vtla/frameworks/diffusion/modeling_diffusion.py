@@ -330,6 +330,10 @@ class DiffusionModel(nn.Module):
         if self.tactile_mode_encode:
             tactile_feats = self.tactile_encoder(batch)  # [B, n_obs_steps, n_keys, P]
             tactile_feats = tactile_feats.reshape(batch_size, n_obs_steps, -1)  # [B, s, n_keys*P]
+            # The MAE encoder runs in bf16; cast to the other conditioning feats' dtype so
+            # the torch.cat below never mismatches (float32 at inference, bf16 under autocast).
+            if global_cond_feats:
+                tactile_feats = tactile_feats.to(global_cond_feats[0].dtype)
             global_cond_feats.append(tactile_feats)
 
         if self.config.env_state_feature:

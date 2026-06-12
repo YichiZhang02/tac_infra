@@ -54,6 +54,10 @@ def get_args_parser():
     parser.add_argument("--frame_cache", action="store_true", default=True,
                         help="Dump kept frames to a uint8 memmap once; train reads it decode-free")
     parser.add_argument("--no_frame_cache", dest="frame_cache", action="store_false")
+    parser.add_argument("--raw_frame_cache", action="store_true",
+                        help="Read a pre-built frame cache directly (no LeRobot dataset / "
+                             "no mp4 / no parquet). For image-stream datasets built via "
+                             "tools/png_to_frame_cache.py; train/val splits by row range.")
     parser.add_argument("--image_size", type=int, default=224,
                         help="Cached/training image size (frames are pre-resized to this)")
 

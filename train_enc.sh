@@ -6,9 +6,26 @@ REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
 # dataset_ids 第一个位置参数，可一个也可多个（多个用引号包成一串，空格分隔）
 #   单个: bash train_enc.sh rm_nist_260320_strawberry
 #   多个: bash train_enc.sh "rm_nist_260320_strawberry rm_nist_260520_usb"
-dataset_ids=${1:-rm_umi_dual_pen_open}
-init_mode=${2:-anytouch}        # scratch | clip | anytouch
-arch=${3:-vit_l}                # vit_l | vit_b
+dataset_ids=${1:-pretrained_data}
+init_mode=${2:-clip}        # scratch | clip | anytouch
+arch=${3:-vit_b}                # vit_l | vit_b
+
+# ===================数据模式自动识别（raw frame_cache vs LeRobot）===================
+# pretrained_data 这类是「裸 frame_cache」：无 LeRobot meta，单路相机，需 --raw_frame_cache，
+# 且跳过 stage1 warm-up / 关闭 contact_filter。下面按 meta/info.json 是否存在自动判定；
+# 可用 RAW_FRAME_CACHE=1/0 强制覆盖。两类数据不能混在同一次训练里。
+_dsroot=${REPO_ROOT}/playground/data
+_has_lerobot=0; _has_raw=0
+for ds in ${dataset_ids}; do
+  if [ -f "${_dsroot}/${ds}/meta/info.json" ]; then _has_lerobot=1; else _has_raw=1; fi
+done
+raw_frame_cache=${RAW_FRAME_CACHE:-}
+if [ -z "${raw_frame_cache}" ]; then
+  if [ "${_has_raw}" = "1" ] && [ "${_has_lerobot}" = "0" ]; then raw_frame_cache=1; else raw_frame_cache=0; fi
+fi
+if [ "${raw_frame_cache}" != "1" ] && [ "${_has_raw}" = "1" ] && [ "${_has_lerobot}" = "1" ]; then
+  echo "ERROR: dataset_ids 同时含裸 frame_cache 与 LeRobot 数据集，无法同跑，请分开训练。"; exit 1
+fi
 
 # 输出/日志命名标签：当前时间 + 数据集数量（如 20260603_210836_2ds），可用 RUN_NAME 覆盖
 num_datasets=$(echo "${dataset_ids}" | wc -w)
@@ -67,10 +84,17 @@ visible_loss_weight=${VISIBLE_LOSS_WEIGHT:-0.1}
 # 与 train.sh 统一为列表写法 [key1,key2,...]（无需给每个元素加引号）。
 # 双臂数据 rm_umi_dual_pen_open 有四路 finger（left/right × finger0/1）。
 # 注：本脚本底层是 argparse(nargs="+")，所以下面会把列表转成空格分隔再传 --camera_keys。
-tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
+if [ "${raw_frame_cache}" = "1" ]; then
+  # 裸 frame_cache（如 pretrained_data）默认单路 finger0
+  tactile_keys=${TACTILE_KEYS:-'[observation.images.cam_finger0]'}
+else
+  tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
+fi
 # 列表 [a,b,c] -> 空格分隔 "a b c"
 _tac_csv=${tactile_keys#[}; _tac_csv=${_tac_csv%]}
 finger_cams=$(printf '%s' "${_tac_csv}" | tr ',' ' ')
+# 缓存按此尺寸 resize；raw 模式必须与构建 frame_cache 时一致（all_<image_size>_v1）
+image_size=${IMAGE_SIZE:-224}
 
 # 接触帧筛选：只挑接触帧训练（逐通道 std > 阈值），非接触帧随机保留 keep_ratio
 # CONTACT_FILTER=0 可关闭；首次运行会算并缓存各数据集 meta/contact_std.npz
@@ -79,10 +103,15 @@ contact_std_threshold=${CONTACT_STD_THRESHOLD:-0.5}
 noncontact_keep_ratio=${NONCONTACT_KEEP_RATIO:-0.05}
 # 构建 contact_std 缓存时逐 episode 顺序解码，每隔 stride 帧算一次 std（其余就近填充），加速首次缓存
 contact_stride=${CONTACT_STRIDE:-1}
+# raw frame_cache 模式没有逐帧解码来源，contact_filter 不可用，强制关闭
+if [ "${raw_frame_cache}" = "1" ]; then contact_filter=0; fi
 contact_args=
 if [ "${contact_filter}" = "1" ]; then
   contact_args="--contact_filter --contact_std_threshold ${contact_std_threshold} --noncontact_keep_ratio ${noncontact_keep_ratio} --contact_stride ${contact_stride}"
 fi
+# raw 模式给 train 传 --raw_frame_cache（跳过 LeRobot，直接读裸缓存）
+raw_args=
+if [ "${raw_frame_cache}" = "1" ]; then raw_args="--raw_frame_cache"; fi
 
 # ===================路径配置===================
 dataset_root=${REPO_ROOT}/playground/data
@@ -110,10 +139,14 @@ echo "Init mode: ${init_mode} | Arch: ${arch}"
 echo "Pretrained path: ${pretrained_path:-<scratch>}"
 echo "Sensor id: ${sensor_id} | Mask ratio: ${mask_ratio} | Val ratio: ${val_ratio}"
 echo "Tactile keys: ${tactile_keys}  ->  --camera_keys ${finger_cams}"
+echo "Data mode: $([ "${raw_frame_cache}" = "1" ] && echo "raw frame_cache (image_size=${image_size}, no LeRobot)" || echo "LeRobot")"
 echo "Contact filter: ${contact_filter} (perchannel-std thr=${contact_std_threshold}, keep_ratio=${noncontact_keep_ratio})"
 echo "Epochs: ${epochs} | Batch size: ${batch_size} | Num processes: ${num_processes}"
 echo "Output dir: ${output_dir}"
 
+if [ "${raw_frame_cache}" = "1" ]; then
+  echo "[stage 1/2] skipped (raw frame_cache; 缓存已离线构建，无需 LeRobot warm-up)"
+else
 echo "[stage 1/2] Warm up dataset caches"
 PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python -m vtla.tac_encoder.tactile_mae.process_data \
     --dataset_root ${dataset_root} \
@@ -123,6 +156,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python -m vtla.tac_encoder.tactile_mae.pro
     --tolerance_s 0.1 \
     ${contact_args} \
     --num_workers ${num_workers}
+fi
 
 echo "[stage 2/2] Train tactile MAE backbone"
 PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id ${launcher} \
@@ -146,6 +180,8 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id ${launcher} \
     --amp_dtype ${amp_dtype} \
     --val_ratio ${val_ratio} \
     --tolerance_s 0.1 \
+    --image_size ${image_size} \
+    ${raw_args} \
     ${contact_args} \
     --num_workers ${num_workers} \
     --output_dir "${output_dir}"

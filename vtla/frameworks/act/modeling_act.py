@@ -482,6 +482,13 @@ class ACT(nn.Module):
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
             for img in batch[OBS_IMAGES]:
+                # Unify every camera (RGB + tactile-as-image) to a common resolution on-GPU
+                # (img is already on the model's device) before the shared resnet backbone.
+                if img.shape[-2:] != self.config.image_resolution:
+                    img = F.interpolate(
+                        img, size=self.config.image_resolution,
+                        mode="bilinear", align_corners=False,
+                    )
                 cam_features = self.backbone(img)["feature_map"]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
@@ -498,7 +505,10 @@ class ACT(nn.Module):
         # Tactile tokens on the encoder side: join the observation tokens so they can
         # interact with vision / state inside the transformer encoder.
         if self.tactile_mode_encode and self.tactile_insert_location == "encoder":
+            # The MAE encoder runs in bf16; cast its tokens to the surrounding token dtype
+            # (float32 at inference, bf16 under autocast) so the stack below never mismatches.
             tactile_tokens = self.tactile_encoder(batch).transpose(0, 1)  # (n_tac, B, D)
+            tactile_tokens = tactile_tokens.to(encoder_in_tokens[0].dtype)
             tactile_pos = self.tactile_pos_embed.weight.unsqueeze(1)  # (n_tac, 1, D)
             encoder_in_tokens.extend(list(tactile_tokens))
             encoder_in_pos_embed.extend(list(tactile_pos))
@@ -515,6 +525,7 @@ class ACT(nn.Module):
         # the action queries can attend to.
         if self.tactile_mode_encode and self.tactile_insert_location == "decoder":
             tactile_tokens = self.tactile_encoder(batch).transpose(0, 1)  # (n_tac, B, D)
+            tactile_tokens = tactile_tokens.to(encoder_out.dtype)
             tactile_pos = self.tactile_pos_embed.weight.unsqueeze(1)  # (n_tac, 1, D)
             encoder_out = torch.cat([encoder_out, tactile_tokens], dim=0)
             encoder_in_pos_embed = torch.cat([encoder_in_pos_embed, tactile_pos], dim=0)

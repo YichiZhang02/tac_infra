@@ -35,6 +35,18 @@ from .models.build import _read_state_dict
 DEFAULT_IMAGE_SIZE = 224
 
 
+def _resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype | None:
+    if dtype is None or isinstance(dtype, torch.dtype):
+        return dtype
+    if dtype == "bfloat16":
+        return torch.bfloat16
+    if dtype == "float16":
+        return torch.float16
+    if dtype == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported tactile-MAE dtype: {dtype}")
+
+
 def _load_checkpoint_args(path: str) -> dict | None:
     """Return the ``args`` namespace stored in our MAE checkpoints as a dict.
 
@@ -81,8 +93,13 @@ class TactileMAEFeatureExtractor(nn.Module):
         image_size: int = DEFAULT_IMAGE_SIZE,
         freeze: bool = False,
         num_query_tokens: int = 8,
+        dtype: str | torch.dtype | None = "bfloat16",
     ):
         super().__init__()
+        self.compute_dtype = _resolve_dtype(dtype)
+        if self.compute_dtype is not None:
+            model.to(dtype=self.compute_dtype)
+
         self.model = model
         self.sensor_id = int(sensor_id)
         self.image_size = int(image_size)
@@ -114,7 +131,8 @@ class TactileMAEFeatureExtractor(nn.Module):
     # ------------------------------------------------------------------
     @classmethod
     def from_pretrained(
-        cls, path: str, freeze: bool = False, num_query_tokens: int = 8
+        cls, path: str, freeze: bool = False, num_query_tokens: int = 8,
+        dtype: str | torch.dtype | None = "bfloat16",
     ) -> "TactileMAEFeatureExtractor":
         """Build the encoder from any supported checkpoint / HF dir.
 
@@ -154,7 +172,7 @@ class TactileMAEFeatureExtractor(nn.Module):
 
         return cls(
             model, sensor_id=sensor_id, image_size=image_size,
-            freeze=freeze, num_query_tokens=num_query_tokens,
+            freeze=freeze, num_query_tokens=num_query_tokens, dtype=dtype,
         )
 
     # ------------------------------------------------------------------
@@ -204,6 +222,8 @@ class TactileMAEFeatureExtractor(nn.Module):
 
         flat = flat.float()
         flat = self._normalize(flat)
+        if self.compute_dtype is not None:
+            flat = flat.to(dtype=self.compute_dtype)
 
         n = flat.shape[0]
         sensor_type = torch.full((n,), self.sensor_id, dtype=torch.long, device=flat.device)

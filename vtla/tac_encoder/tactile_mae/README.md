@@ -101,6 +101,35 @@ tactile_mae/
 ├── config.py · train.py · eval.py
 ```
 
+## Pretrain on a flat image stream (no LeRobot)
+
+To pretrain on a raw directory of tactile PNGs (e.g. AnyTouch `data_tac2_s`,
+a single continuous stream with no episodes / state / action), skip LeRobot
+entirely: convert the PNGs straight into the decode-once **frame cache** and
+train with `--raw_frame_cache`.
+
+```bash
+# 1) PNG stream -> frame cache (resized uint8 memmap; ~16.5 GB for 224 @ 114905 frames)
+python -m vtla.tac_encoder.tactile_mae.tools.png_to_frame_cache \
+  --src_dir <flat_png_dir> \
+  --dataset_root playground/data --dataset_id pretrained_data \
+  --camera_key observation.images.cam_finger0 --image_size 224 --num_workers 16
+
+# 2) train directly off the cache (no mp4 / parquet / LeRobot metadata)
+torchrun --nproc_per_node=4 -m vtla.tac_encoder.tactile_mae.train \
+  --raw_frame_cache --dataset_root playground/data --dataset_ids pretrained_data \
+  --camera_keys observation.images.cam_finger0 --image_size 224 \
+  --arch vit_l --pretrained_path playground/pretrained_models/checkpoint.pth \
+  --sensor_id -1 --use_sensor_token --use_same_patchemb --sensor_token_for_all \
+  --batch_size 64 --epochs 20 --output_dir playground/results/tac_mae_pretrain
+```
+
+`--raw_frame_cache` reads the pre-built cache directly and splits train/val by
+contiguous **row range** (last `--val_ratio` fraction = val), since the stream has
+no episodes. `--image_size` must match what the cache was built with (the cache
+signature folder, e.g. `all_224_v1`, encodes it). Contact filtering is not
+available in this mode (it needs per-frame decode from a LeRobot dataset).
+
 ## Contact-frame filtering (optional)
 
 By default every tactile frame is used. With `--contact_filter`, training keeps

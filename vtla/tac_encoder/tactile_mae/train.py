@@ -42,7 +42,7 @@ def main(args):
     # ----- data -----
     # Precompute the contact-std + decode-once frame caches on the main process
     # only (avoids a DDP race where every rank would decode & write concurrently).
-    if misc.is_main_process():
+    if misc.is_main_process() and not args.raw_frame_cache:
         if args.contact_filter:
             from .data.contact import load_or_compute_contact_std
             for ds_id in args.dataset_ids:
@@ -71,7 +71,8 @@ def main(args):
         contact_std_threshold=args.contact_std_threshold,
         noncontact_keep_ratio=args.noncontact_keep_ratio, contact_seed=args.contact_seed,
         contact_num_workers=args.num_workers, contact_stride=args.contact_stride,
-        frame_cache=args.frame_cache, image_size=args.image_size)
+        frame_cache=args.frame_cache, image_size=args.image_size,
+        raw_frame_cache=args.raw_frame_cache)
     print(f"Train dataset: {len(dataset_train)} samples from {args.dataset_ids}")
 
     # Held-out val set (main process only; used for periodic eval + reconstruction viz).
@@ -86,7 +87,8 @@ def main(args):
             contact_std_threshold=args.contact_std_threshold,
             noncontact_keep_ratio=args.noncontact_keep_ratio, contact_seed=args.contact_seed,
             contact_num_workers=args.num_workers, contact_stride=args.contact_stride,
-            return_meta=False, frame_cache=args.frame_cache, image_size=args.image_size)
+            return_meta=False, frame_cache=args.frame_cache, image_size=args.image_size,
+            raw_frame_cache=args.raw_frame_cache)
         print(f"Val dataset: {len(dataset_val)} samples")
 
     num_tasks = misc.get_world_size()

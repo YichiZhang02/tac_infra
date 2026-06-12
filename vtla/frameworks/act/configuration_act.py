@@ -95,6 +95,11 @@ class ACTConfig(SensorRoutingMixin, PreTrainedConfig):
         }
     )
 
+    # All routed cameras (RGB + tactile-as-image) are bilinearly resized to this common
+    # (H, W) on-GPU inside the model before the vision backbone, so every view shares one
+    # resolution and no CPU round-trip is needed.
+    image_resolution: tuple[int, int] = (224, 224)
+
     # Architecture.
     # Vision backbone.
     vision_backbone: str = "resnet18"

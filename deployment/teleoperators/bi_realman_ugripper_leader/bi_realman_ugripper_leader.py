@@ -128,7 +128,7 @@ class BiRealmanUGripperLeader(Teleoperator):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} 已连接")
 
-        from .leader_arm import LeaderArm
+        from deployment.hardware.leader_arms import RealmanLeader as LeaderArm
 
         for side in self.config.arms:
             port = self._port(side)

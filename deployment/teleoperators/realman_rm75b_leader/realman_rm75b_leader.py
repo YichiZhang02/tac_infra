@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from deployment.motors import MotorCalibration
+from deployment.hardware.calibration import MotorCalibration
 from deployment.teleoperators.teleoperator import Teleoperator
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -128,7 +128,7 @@ class RealmanRM75bLeader(Teleoperator):
             )
 
         # 导入并创建主臂通信类
-        from deployment.robots.realman_rm75b.leader_arm import LeaderArm
+        from deployment.hardware.leader_arms import RealmanLeader as LeaderArm
         
         logger.info(f"正在连接主臂 {self.config.port}...")
         self._leader_arm = LeaderArm(

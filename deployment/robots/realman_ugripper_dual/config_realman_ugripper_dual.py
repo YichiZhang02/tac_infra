@@ -33,8 +33,7 @@ observation / action 字段统一加 left_ / right_ 前缀:
 
 from dataclasses import dataclass, field
 
-from deployment.cameras import CameraConfig
-from deployment.cameras.opencv import OpenCVCameraConfig
+from deployment.hardware.top_cameras import OpenCVTopCameraConfig
 
 from ..config import RobotConfig
 
@@ -47,6 +46,12 @@ class RealmanUGripperDualConfig(RobotConfig):
     # ============ 启用的手臂 ============
     # 可选 ["left"], ["right"], 或 ["left", "right"]
     arms: list[str] = field(default_factory=lambda: ["left", "right"])
+
+    # ============ 硬件存在性开关 (物理 rig 有什么就开什么) ============
+    # 触觉传感器: True=连接并产出 *_cam_finger0/1 观测; False=完全跳过 (原 _notac 变体)。
+    # 顶部相机: 由下方 cameras 配置控制 (空字典 = 无 top, 原 _notop 变体)。
+    # 关节 state 永远产出, 不设开关 (控制/安全都需要; 模型是否消费由 checkpoint 决定)。
+    use_tactile: bool = True
 
     # ============ 从臂 (Follower - TCP/IP) ============
     left_follower_ip: str = "192.168.1.200"
@@ -79,7 +84,7 @@ class RealmanUGripperDualConfig(RobotConfig):
     fisheye_max_datagram: int = 1200
 
     # ============ 触觉传感器 (dmrobotics Flux gRPC) ============
-    pc_host: str = "192.168.1.100"          # 本机 IP, 用于 UDP 回传
+    pc_host: str = "192.168.1.120"          # 本机 IP, 用于 UDP 回传
     tactile0_grpc_port: int = 50051
     tactile1_grpc_port: int = 50052
     tactile0_dev_id: int = 0
@@ -102,7 +107,7 @@ class RealmanUGripperDualConfig(RobotConfig):
     tactile_deform_max: float = 1.0
 
     # ============ 数据流首帧等待超时 ============
-    stream_first_frame_timeout: float = 15.0
+    stream_first_frame_timeout: float = 5.0
 
     # ============ 数据流限速 ============
     # ⚠️ 跳帧式限速的"量化陷阱": 从 ~50fps 的鱼眼源按 N 限速, 会被量化成源帧率的整数
@@ -125,9 +130,9 @@ class RealmanUGripperDualConfig(RobotConfig):
 
     # ============ 额外本地 USB 相机 ============
     # 顶部全景相机 (cam_top), 参考 realman_tactile_shandd_hd_tac16
-    cameras: dict[str, CameraConfig] = field(
+    cameras: dict[str, OpenCVTopCameraConfig] = field(
         default_factory=lambda: {
-            "cam_top": OpenCVCameraConfig(
+            "cam_top": OpenCVTopCameraConfig(
                 index_or_path=6,
                 fps=30,
                 width=1920,

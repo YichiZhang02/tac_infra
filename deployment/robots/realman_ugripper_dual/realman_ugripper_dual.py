@@ -32,8 +32,8 @@
         {side}_main_joint1..7  (float, 弧度)
         {side}_main_gripper    (float, 归一化 [0,1])
 
-并发: 6 路视觉/触觉数据流各跑独立进程 (见 stream_receivers.py), 从臂关节状态各跑一个
-后台线程 (AsyncFollowerStateReader), get_observation 全程非阻塞。
+并发: 各路视觉/触觉数据流各跑独立进程 (见 deployment/hardware 下各硬件类), 从臂关节状态
+各跑一个后台线程 (RealmanTcpFollower 内部状态读取), get_observation 全程非阻塞。
 """
 
 import logging
@@ -46,20 +46,17 @@ from typing import Any
 
 import numpy as np
 
-from deployment.cameras.utils import make_cameras_from_configs
-from deployment.motors import MotorCalibration
+from deployment.hardware.top_cameras import make_top_cameras_from_configs
+from deployment.hardware.calibration import MotorCalibration
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
 from .config_realman_ugripper_dual import RealmanUGripperDualConfig
-from .lingkong_gripper import LingkongGripper
-from .stream_receivers import (
-    StreamReceiver,
-    _fisheye_worker,
-    _tactile_worker,
-    decode_fisheye_jpeg,
-)
+from deployment.hardware.grippers import LingkongGripper
+from deployment.hardware.wrist_cameras import FisheyeGrpcCamera
+from deployment.hardware.tactile_sensors import DmroboticsFlux
+from deployment.hardware.follower_arms import RealmanTcpFollower
 
 # 添加 Robotic_Arm SDK 路径 (deployment/sdk，使仓库自包含)
 sys.path.append(str(Path(__file__).resolve().parents[2] / "sdk"))
@@ -67,63 +64,21 @@ sys.path.append(str(Path(__file__).resolve().parents[2] / "sdk"))
 logger = logging.getLogger(__name__)
 
 
-class AsyncFollowerStateReader(threading.Thread):
-    """异步从臂关节状态读取器。
-
-    rm_get_joint_degree() 约 50ms 延迟, 在独立线程持续读取并缓存, 主循环非阻塞取用。
-    """
-
-    def __init__(self, follower_arm, use_degrees: bool = False, dof: int = 7):
-        super().__init__(daemon=True, name="FollowerStateReader")
-        self.follower_arm = follower_arm
-        self.use_degrees = use_degrees
-        self.running = True
-        self._lock = threading.Lock()
-        self._joints = [0.0] * dof
-        self._last_update = 0.0
-
-    def run(self):
-        while self.running:
-            try:
-                ret, joints_deg = self.follower_arm.rm_get_joint_degree()
-                if ret == 0:
-                    joints = list(joints_deg) if self.use_degrees else [np.radians(j) for j in joints_deg]
-                    with self._lock:
-                        self._joints = joints
-                        self._last_update = time.time()
-            except Exception as e:
-                logger.debug(f"异步读取从臂状态错误: {e}")
-            time.sleep(0.005)
-
-    def get_state(self) -> list[float]:
-        with self._lock:
-            return self._joints.copy()
-
-    def get_state_age(self) -> float:
-        with self._lock:
-            return time.time() - self._last_update if self._last_update > 0 else float("inf")
-
-    def stop(self):
-        self.running = False
-
-
 class _ArmDevices:
     """单条手臂的从臂侧设备集合。"""
 
     def __init__(self, side: str):
         self.side = side
-        self.follower_arm = None
-        self.follower_handle = None
-        self.follower_connected = False
-        self.state_reader: AsyncFollowerStateReader | None = None
+        self.follower: RealmanTcpFollower | None = None
         self.gripper: LingkongGripper | None = None
         # 数据流接收器
-        self.fisheye: StreamReceiver | None = None
-        self.tactile0: StreamReceiver | None = None
-        self.tactile1: StreamReceiver | None = None
+        self.fisheye: FisheyeGrpcCamera | None = None
+        self.tactile0: DmroboticsFlux | None = None
+        self.tactile1: DmroboticsFlux | None = None
 
     @property
-    def receivers(self) -> list[StreamReceiver]:
+    def receivers(self) -> list:
+        """所有数据流硬件 (鱼眼 + 两路触觉), 均带 connect/async_read/disconnect/is_connected。"""
         return [r for r in (self.fisheye, self.tactile0, self.tactile1) if r is not None]
 
 
@@ -145,29 +100,10 @@ class RealmanUGripperDual(Robot):
             if side not in ("left", "right"):
                 raise ValueError(f"无效的手臂名 '{side}', 只支持 'left' / 'right'")
 
-        self._arm_sdk = None
-        self._sdk_lock = threading.Lock()  # 保护并行连接时 Robotic_Arm SDK 句柄创建
         self._arms: dict[str, _ArmDevices] = {side: _ArmDevices(side) for side in config.arms}
 
         # 额外本地相机 (默认无)
-        self.cameras = make_cameras_from_configs(config.cameras)
-
-        # 预备空帧
-        self._empty_wrist = np.zeros((config.fisheye_height, config.fisheye_width, 3), dtype=np.uint8)
-        self._empty_tactile = np.zeros((config.tactile_height, config.tactile_width, 3), dtype=np.uint8)
-
-    # ==================== SDK ====================
-
-    def _import_sdk(self):
-        if self._arm_sdk is None:
-            try:
-                from Robotic_Arm.rm_robot_interface import RoboticArm, rm_thread_mode_e
-                self._arm_sdk = {"RoboticArm": RoboticArm, "rm_thread_mode_e": rm_thread_mode_e}
-            except ImportError as e:
-                raise ImportError(
-                    f"无法导入睿尔曼 SDK (Robotic_Arm)。请确认其在 deployment/sdk/ 下。原始错误: {e}"
-                )
-        return self._arm_sdk
+        self.cameras = make_top_cameras_from_configs(config.cameras)
 
     # ==================== 配置辅助 ====================
 
@@ -201,8 +137,9 @@ class RealmanUGripperDual(Robot):
         ft: dict[str, tuple] = {}
         for side in self.config.arms:
             ft[f"{side}_cam_wrist"] = (self.config.fisheye_height, self.config.fisheye_width, 3)
-            ft[f"{side}_cam_finger0"] = (self.config.tactile_height, self.config.tactile_width, 3)
-            ft[f"{side}_cam_finger1"] = (self.config.tactile_height, self.config.tactile_width, 3)
+            if self.config.use_tactile:
+                ft[f"{side}_cam_finger0"] = (self.config.tactile_height, self.config.tactile_width, 3)
+                ft[f"{side}_cam_finger1"] = (self.config.tactile_height, self.config.tactile_width, 3)
         return ft
 
     @staticmethod
@@ -247,7 +184,7 @@ class RealmanUGripperDual(Robot):
 
     @property
     def is_connected(self) -> bool:
-        arms_ok = all(arm.follower_connected for arm in self._arms.values())
+        arms_ok = all(arm.follower is not None and arm.follower.is_connected for arm in self._arms.values())
         streams_ok = all(r.is_connected for arm in self._arms.values() for r in arm.receivers)
         cameras_ok = all(cam.is_connected for cam in self.cameras.values())
         return arms_ok and streams_ok and cameras_ok
@@ -257,8 +194,6 @@ class RealmanUGripperDual(Robot):
     def connect(self, calibrate: bool = True) -> None:
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} 已连接")
-
-        self._import_sdk()
 
         # 两条臂硬件完全独立 (不同板子/夹爪/从臂), 并行连接以缩短启动时间。
         # 各自的耗时大头: 3 路数据流首帧等待 + 夹爪 grip_init 自标定 (会开合两次)。
@@ -300,9 +235,6 @@ class RealmanUGripperDual(Robot):
 
     def _connect_one_arm(self, side: str) -> None:
         """连接单条臂的全部从臂侧设备 (供并行线程调用)。"""
-        sdk = self._import_sdk()
-        RoboticArm = sdk["RoboticArm"]
-        rm_thread_mode_e = sdk["rm_thread_mode_e"]
         arm = self._arms[side]
         logger.info(f"==== 正在连接 {side} 臂 ====")
 
@@ -312,44 +244,27 @@ class RealmanUGripperDual(Robot):
         # 2. 领控电爪 (会夹紧)
         self._connect_gripper(side, arm)
 
-        # 3. 从臂 TCP (SDK 句柄创建上锁, 避免并行竞争)
+        # 3. 从臂 TCP (RealmanTcpFollower 内部含句柄创建锁 + 异步状态读取线程)
         follower_ip = self._follower_ip(side)
         logger.info(f"[{side}] 正在连接从臂 {follower_ip}:{self.config.follower_tcp_port}...")
-        with self._sdk_lock:
-            arm.follower_arm = RoboticArm(rm_thread_mode_e.RM_TRIPLE_MODE_E)
-            arm.follower_handle = arm.follower_arm.rm_create_robot_arm(
-                follower_ip, self.config.follower_tcp_port
-            )
-        if arm.follower_handle.id < 0:
-            raise ConnectionError(
-                f"[{side}] 从臂连接失败! IP: {follower_ip}, 错误代码: {arm.follower_handle.id}"
-            )
-        arm.follower_connected = True
-        logger.info(f"[{side}] 从臂连接成功 Handle ID: {arm.follower_handle.id}")
-
-        # 4. 异步从臂状态读取线程
-        arm.state_reader = AsyncFollowerStateReader(
-            follower_arm=arm.follower_arm, use_degrees=self.config.use_degrees, dof=self.DOF
+        arm.follower = RealmanTcpFollower(
+            ip=follower_ip,
+            port=self.config.follower_tcp_port,
+            dof=self.DOF,
+            use_degrees=self.config.use_degrees,
+            name=f"{side}_follower",
         )
-        arm.state_reader.start()
-        time.sleep(0.1)
+        arm.follower.connect()
 
     def _safe_teardown(self) -> None:
         """尽力断开已连接设备 (连接失败回滚用, 不抛异常)。"""
         for arm in self._arms.values():
-            if arm.state_reader is not None:
+            if arm.follower is not None:
                 try:
-                    arm.state_reader.stop()
-                    arm.state_reader.join(timeout=1.0)
+                    arm.follower.disconnect()
                 except Exception:
                     pass
-                arm.state_reader = None
-            if arm.follower_connected and arm.follower_arm is not None:
-                try:
-                    arm.follower_arm.rm_delete_robot_arm()
-                except Exception:
-                    pass
-                arm.follower_connected = False
+                arm.follower = None
             if arm.gripper is not None:
                 try:
                     arm.gripper.disconnect()
@@ -369,40 +284,55 @@ class RealmanUGripperDual(Robot):
         udp_port = self._fisheye_udp_port(side)
         pc_port0, pc_port1 = self._tactile_pc_ports(side)
 
-        arm.fisheye = StreamReceiver(
+        arm.fisheye = FisheyeGrpcCamera(
+            ip=board_ip,
+            grpc_port=cfg.fisheye_grpc_port,
+            udp_port=udp_port,
+            width=cfg.fisheye_width,
+            height=cfg.fisheye_height,
+            max_datagram=cfg.fisheye_max_datagram,
+            max_fps=cfg.stream_max_fps,
+            debug=cfg.stream_debug_fps,
+            first_frame_timeout=cfg.stream_first_frame_timeout,
             name=f"{side}_cam_wrist",
-            target=_fisheye_worker,
-            args=(board_ip, cfg.fisheye_grpc_port, udp_port,
-                  cfg.fisheye_width, cfg.fisheye_height, cfg.fisheye_max_datagram,
-                  cfg.stream_max_fps, cfg.stream_debug_fps),
-            empty_frame=self._empty_wrist,
-            first_frame_timeout=cfg.stream_first_frame_timeout,
-            decode_fn=decode_fisheye_jpeg,   # 队列传 JPEG 字节, 消费端解码
         )
-        arm.tactile0 = StreamReceiver(
-            name=f"{side}_cam_finger0",
-            target=_tactile_worker,
-            args=(cfg.tactile0_dev_id, f"{board_ip}:{cfg.tactile0_grpc_port}", cfg.pc_host, pc_port0,
-                  cfg.stream_max_fps, cfg.stream_debug_fps,
-                  cfg.tactile_depth_min, cfg.tactile_depth_max,
-                  cfg.tactile_deform_min, cfg.tactile_deform_max),
-            empty_frame=self._empty_tactile,
-            first_frame_timeout=cfg.stream_first_frame_timeout,
-        )
-        arm.tactile1 = StreamReceiver(
-            name=f"{side}_cam_finger1",
-            target=_tactile_worker,
-            args=(cfg.tactile1_dev_id, f"{board_ip}:{cfg.tactile1_grpc_port}", cfg.pc_host, pc_port1,
-                  cfg.stream_max_fps, cfg.stream_debug_fps,
-                  cfg.tactile_depth_min, cfg.tactile_depth_max,
-                  cfg.tactile_deform_min, cfg.tactile_deform_max),
-            empty_frame=self._empty_tactile,
-            first_frame_timeout=cfg.stream_first_frame_timeout,
-        )
+        if cfg.use_tactile:
+            arm.tactile0 = DmroboticsFlux(
+                dev_id=cfg.tactile0_dev_id,
+                remote_addr=f"{board_ip}:{cfg.tactile0_grpc_port}",
+                pc_host=cfg.pc_host,
+                pc_port=pc_port0,
+                width=cfg.tactile_width,
+                height=cfg.tactile_height,
+                max_fps=cfg.stream_max_fps,
+                debug=cfg.stream_debug_fps,
+                depth_min=cfg.tactile_depth_min,
+                depth_max=cfg.tactile_depth_max,
+                deform_min=cfg.tactile_deform_min,
+                deform_max=cfg.tactile_deform_max,
+                first_frame_timeout=cfg.stream_first_frame_timeout,
+                name=f"{side}_cam_finger0",
+            )
+            arm.tactile1 = DmroboticsFlux(
+                dev_id=cfg.tactile1_dev_id,
+                remote_addr=f"{board_ip}:{cfg.tactile1_grpc_port}",
+                pc_host=cfg.pc_host,
+                pc_port=pc_port1,
+                width=cfg.tactile_width,
+                height=cfg.tactile_height,
+                max_fps=cfg.stream_max_fps,
+                debug=cfg.stream_debug_fps,
+                depth_min=cfg.tactile_depth_min,
+                depth_max=cfg.tactile_depth_max,
+                deform_min=cfg.tactile_deform_min,
+                deform_max=cfg.tactile_deform_max,
+                first_frame_timeout=cfg.stream_first_frame_timeout,
+                name=f"{side}_cam_finger1",
+            )
         # 3 路数据流相互独立, 并行启动 (各自要等首帧, 串行会叠加)
         stream_errors: dict[str, Exception] = {}
 
-        def _connect_stream(r: StreamReceiver):
+        def _connect_stream(r):
             try:
                 logger.info(f"[{side}] 正在启动数据流 {r.name}...")
                 r.connect()
@@ -482,11 +412,11 @@ class RealmanUGripperDual(Robot):
         # 1. 关节 + 夹爪 (state)
         for side in self.config.arms:
             arm = self._arms[side]
-            joints = arm.state_reader.get_state() if arm.state_reader is not None else [0.0] * self.DOF
+            joints = arm.follower.read_joints() if arm.follower is not None else [0.0] * self.DOF
             for i, joint in enumerate(self.JOINT_NAMES):
                 obs[f"{side}_{joint}"] = joints[i]
-            if arm.state_reader is not None and arm.state_reader.get_state_age() > 0.1:
-                logger.warning(f"[{side}] 从臂状态过时: {arm.state_reader.get_state_age()*1000:.0f}ms")
+            if arm.follower is not None and arm.follower.get_state_age() > 0.1:
+                logger.warning(f"[{side}] 从臂状态过时: {arm.follower.get_state_age()*1000:.0f}ms")
 
             obs[f"{side}_{self.GRIPPER_NAME}"] = (
                 arm.gripper.read_norm() if arm.gripper is not None else 0.0
@@ -496,8 +426,9 @@ class RealmanUGripperDual(Robot):
         for side in self.config.arms:
             arm = self._arms[side]
             obs[f"{side}_cam_wrist"] = arm.fisheye.async_read()
-            obs[f"{side}_cam_finger0"] = arm.tactile0.async_read()
-            obs[f"{side}_cam_finger1"] = arm.tactile1.async_read()
+            if self.config.use_tactile:
+                obs[f"{side}_cam_finger0"] = arm.tactile0.async_read()
+                obs[f"{side}_cam_finger1"] = arm.tactile1.async_read()
 
         # 3. 额外本地相机
         for cam_key, cam in self.cameras.items():
@@ -527,26 +458,17 @@ class RealmanUGripperDual(Robot):
             }
 
             # 2. 安全限幅 (相对当前)
-            if self.config.max_relative_target is not None and goal_pos:
-                result = arm.follower_arm.rm_get_joint_degree()
-                if result[0] == 0:
-                    present = {
-                        joint: (result[1][i] if self.config.use_degrees else np.radians(result[1][i]))
-                        for i, joint in enumerate(self.JOINT_NAMES)
-                    }
+            if self.config.max_relative_target is not None and goal_pos and arm.follower is not None:
+                present_arr = arm.follower.read_joints_now()  # 配置单位, 失败返回 None
+                if present_arr is not None:
+                    present = {joint: present_arr[i] for i, joint in enumerate(self.JOINT_NAMES)}
                     goal_present = {k: (goal_pos[k], present[k]) for k in goal_pos}
                     goal_pos = ensure_safe_goal_position(goal_present, self.config.max_relative_target)
 
-            # 3. 转角度并下发
-            target_degrees = []
-            for joint in self.JOINT_NAMES:
-                val = goal_pos.get(joint, 0.0)
-                if not self.config.use_degrees:
-                    val = np.degrees(val)
-                target_degrees.append(float(val))
-            ret = arm.follower_arm.rm_movej_canfd(target_degrees, False, 0)
-            if ret != 0:
-                logger.warning(f"[{side}] 发送关节动作失败, 错误码: {ret}")
+            # 3. 下发 (follower 内部按配置单位换算成角度)
+            target = [goal_pos.get(joint, 0.0) for joint in self.JOINT_NAMES]
+            if arm.follower is not None:
+                arm.follower.send_joints(target)
 
             for joint in self.JOINT_NAMES:
                 sent_action[f"{side}_{joint}"] = goal_pos.get(joint, 0.0)
@@ -568,22 +490,13 @@ class RealmanUGripperDual(Robot):
             raise DeviceNotConnectedError(f"{self} 未连接")
 
         for side, arm in self._arms.items():
-            # 状态线程
-            if arm.state_reader is not None:
+            # 从臂 (内部含状态线程停止 + 句柄删除)
+            if arm.follower is not None:
                 try:
-                    arm.state_reader.stop()
-                    arm.state_reader.join(timeout=1.0)
-                except Exception as e:
-                    logger.warning(f"[{side}] 停止状态线程出错: {e}")
-                arm.state_reader = None
-
-            # 从臂
-            if arm.follower_connected and arm.follower_arm is not None:
-                try:
-                    arm.follower_arm.rm_delete_robot_arm()
+                    arm.follower.disconnect()
                 except Exception as e:
                     logger.warning(f"[{side}] 断开从臂出错: {e}")
-                arm.follower_connected = False
+                arm.follower = None
 
             # 夹爪
             if arm.gripper is not None:

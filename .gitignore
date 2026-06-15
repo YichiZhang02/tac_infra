@@ -3,6 +3,7 @@ playground/data/**
 playground/logs/**
 playground/pretrained_models/**
 playground/results/**
+playground/eval/**
 !playground/data/
 !playground/data/.gitkeep
 !playground/logs/
@@ -15,6 +16,8 @@ playground/results/**
 !playground/pretrained_models/.gitkeep
 !playground/results/
 !playground/results/.gitkeep
+!playground/eval/
+!playground/eval/.gitkeep
 !playground/results/backbones/
 !playground/results/backbones/.gitkeep
 !playground/results/models/

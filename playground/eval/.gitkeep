@@ -1,0 +1,5 @@
+python -m deployment.inference \
+    --robot.type=realman_ugripper_dual \
+    --policy.path= \
+    --dataset.repo_id=eval_pen \
+    --match-policy

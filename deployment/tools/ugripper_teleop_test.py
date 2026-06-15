@@ -36,11 +36,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 添加路径
-_DEPLOY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# 添加路径 (本文件位于 deployment/tools/, 上一级即 deployment/)
+_DEPLOY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(_DEPLOY_ROOT, 'sdk'))                              # Robotic_Arm 模块
 sys.path.insert(0, os.path.join(_DEPLOY_ROOT, 'sdk', 'dm_lingkong_grip'))  # dm_lingkong_grip_sdk 包
-sys.path.insert(0, os.path.join(_DEPLOY_ROOT, 'robots', 'realman_rm75b_hd'))       # LeaderArm (绕开 robots/__init__.py)
+sys.path.insert(0, os.path.dirname(_DEPLOY_ROOT))                                  # tac_infra 根 (供 import deployment.*)
 
 # 全局停止标志
 stop_flag = False
@@ -154,7 +154,7 @@ class ArmController:
     def connect_leader(self) -> bool:
         """连接主臂"""
         try:
-            from leader_arm import LeaderArm
+            from deployment.hardware.leader_arms import RealmanLeader as LeaderArm
             
             # 尝试主端口，如果不存在则尝试备用端口
             port = None

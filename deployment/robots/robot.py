@@ -19,7 +19,7 @@ from typing import Any
 
 import draccus
 
-from deployment.motors import MotorCalibration
+from deployment.hardware.calibration import MotorCalibration
 from vtla.engine.utils.constants import HF_LEROBOT_CALIBRATION, ROBOTS
 
 from .config import RobotConfig

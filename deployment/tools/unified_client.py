@@ -34,10 +34,10 @@ from queue import Empty
 import cv2
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))          # ugripper/
-WS = os.path.dirname(HERE)                                  # lerobot_tactile_ws/
-sys.path.insert(0, os.path.join(WS, "SDK_Publish_1.2.3"))
-sys.path.insert(0, os.path.join(HERE, "fish_camera_client"))
+HERE = os.path.dirname(os.path.abspath(__file__))   # deployment/tools/
+SDK_ROOT = os.path.join(os.path.dirname(HERE), "sdk")  # deployment/sdk/
+sys.path.insert(0, os.path.join(SDK_ROOT, "SDK_Publish_1.2.3"))
+sys.path.insert(0, os.path.join(SDK_ROOT, "fish_camera_client"))
 
 PC_HOST = "192.168.1.120"
 PANEL_H = 360  # 每个画面显示高度

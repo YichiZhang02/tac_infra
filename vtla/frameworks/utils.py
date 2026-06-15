@@ -80,17 +80,46 @@ def get_output_shape(module: nn.Module, input_shape: tuple) -> tuple:
     return tuple(output.shape)
 
 
-def log_model_loading_keys(missing_keys: list[str], unexpected_keys: list[str]) -> None:
-    """Log missing and unexpected keys when loading a model.
+def log_model_loading_keys(
+    missing_keys: list[str],
+    unexpected_keys: list[str],
+    *,
+    model_name: str | None = None,
+    max_display: int = 20,
+) -> None:
+    """Log missing and unexpected keys when loading a model checkpoint.
+
+    Always emits a one-line summary with the counts (so that a clean load is
+    visible too, not just a silent success), followed by the actual key names
+    (truncated to ``max_display``) whenever any are present.
 
     Args:
-        missing_keys (list[str]): Keys that were expected but not found.
-        unexpected_keys (list[str]): Keys that were found but not expected.
+        missing_keys (list[str]): Keys expected by the model but not found in the checkpoint.
+        unexpected_keys (list[str]): Keys present in the checkpoint but not used by the model.
+        model_name (str | None): Optional model/policy name used to tag the log lines.
+        max_display (int): Maximum number of keys to list before truncating.
     """
+    tag = f"[{model_name}] " if model_name else ""
+    missing_keys = list(missing_keys)
+    unexpected_keys = list(unexpected_keys)
+
+    def _fmt(keys: list[str]) -> str:
+        shown = keys[:max_display]
+        out = "".join(f"\n  - {k}" for k in shown)
+        if len(keys) > max_display:
+            out += f"\n  ... and {len(keys) - max_display} more"
+        return out
+
+    logging.info(
+        f"{tag}Loaded checkpoint weights: "
+        f"{len(missing_keys)} missing key(s), {len(unexpected_keys)} unexpected key(s)."
+    )
     if missing_keys:
-        logging.warning(f"Missing key(s) when loading model: {missing_keys}")
+        logging.warning(f"{tag}Missing key(s) when loading model:{_fmt(missing_keys)}")
     if unexpected_keys:
-        logging.warning(f"Unexpected key(s) when loading model: {unexpected_keys}")
+        logging.warning(f"{tag}Unexpected key(s) when loading model:{_fmt(unexpected_keys)}")
+    if not missing_keys and not unexpected_keys:
+        logging.info(f"{tag}All keys matched: model weights fully loaded from checkpoint.")
 
 
 # TODO(Steven): Move this function to a proper preprocessor step

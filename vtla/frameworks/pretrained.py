@@ -146,7 +146,11 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
 
         # Load the model with appropriate kwargs
         missing_keys, unexpected_keys = load_model_as_safetensor(model, model_file, **kwargs)
-        log_model_loading_keys(missing_keys, unexpected_keys)
+        log_model_loading_keys(
+            missing_keys,
+            unexpected_keys,
+            model_name=getattr(model, "name", model.__class__.__name__),
+        )
 
         # For older versions, manually move to device if needed
         if "device" not in kwargs and map_location != "cpu":

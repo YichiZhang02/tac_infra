@@ -20,9 +20,9 @@ case "${policy_type}" in
 esac
 # ===================训练配置===================
 gpu_id=0,1,2,3
-num_processes=${3:-1}
-batch_size=${4:-1}
-steps=${5:-5_000}
+num_processes=${3:-4}
+batch_size=${4:-32}
+steps=${5:-10_000}
 save_freq=5_000
 log_freq=100
 
@@ -30,7 +30,7 @@ log_freq=100
 # wrist_only: true 只用 wrist 相机; false 用 top + wrist
 # tactile_mode: none(触觉不进模型) / as_image(触觉作为图像输入) / encode(触觉 encoder, 预留未实现)
 # state_mode: none(完全不用 state) / joint(关节角) / ee(末端位姿，当前预留未实现)
-wrist_only=${6:-true}
+wrist_only=${6:-false}
 tactile_mode=${7:-none}
 state_mode=${8:-joint}
 

@@ -62,6 +62,7 @@ from vtla.engine.utils.constants import (
 
 from ..pretrained import PreTrainedPolicy, T
 from ..tactile_encode import TactileEncoder
+from ..utils import log_model_loading_keys
 from .configuration_pi05 import DEFAULT_IMAGE_SIZE, PI05Config
 
 try:
@@ -1095,28 +1096,7 @@ class PI05Policy(PreTrainedPolicy):
                 remapped_state_dict, strict=effective_strict
             )
 
-            if missing_keys:
-                print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
-                if len(missing_keys) <= 5:
-                    for key in missing_keys:
-                        print(f"  - {key}")
-                else:
-                    for key in missing_keys[:5]:
-                        print(f"  - {key}")
-                    print(f"  ... and {len(missing_keys) - 5} more")
-
-            if unexpected_keys:
-                print(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
-                if len(unexpected_keys) <= 5:
-                    for key in unexpected_keys:
-                        print(f"  - {key}")
-                else:
-                    for key in unexpected_keys[:5]:
-                        print(f"  - {key}")
-                    print(f"  ... and {len(unexpected_keys) - 5} more")
-
-            if not missing_keys and not unexpected_keys:
-                print("All keys loaded successfully!")
+            log_model_loading_keys(missing_keys, unexpected_keys, model_name=cls.name)
 
         except Exception as e:
             print(f"Warning: Could not load state dict: {e}")

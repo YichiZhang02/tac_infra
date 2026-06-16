@@ -144,8 +144,41 @@ class TrainPipelineConfig(HubMixin):
         return draccus.encode(self)  # type: ignore[no-any-return]  # because of the third-party library draccus uses Any as the return type
 
     def _save_pretrained(self, save_directory: Path) -> None:
-        with open(save_directory / TRAIN_CONFIG_NAME, "w") as f, draccus.config_type("json"):
-            draccus.dump(self, f, indent=4)
+        # 保存时把 cwd(仓库根) 下的绝对路径转相对, 使 train_config.json 跨机器可移植。
+        # 只动 output_dir / dataset.root 两个已知会出现绝对路径的字段; dump 完恢复, 不影响内存中后续使用。
+        cwd = Path.cwd()
+
+        def _to_rel(v):
+            if not v:
+                return v, False
+            p = Path(v)
+            if not p.is_absolute():
+                return v, False
+            try:
+                rel = p.relative_to(cwd)
+            except ValueError:
+                return v, False  # 不在仓库下 (如别的挂载点), 无法相对化, 保持原样
+            return (rel if isinstance(v, Path) else str(rel)), True
+
+        saved = {}
+        new_out, changed = _to_rel(self.output_dir)
+        if changed:
+            saved["output_dir"] = self.output_dir
+            self.output_dir = new_out
+        ds = getattr(self, "dataset", None)
+        if ds is not None and getattr(ds, "root", None):
+            new_root, changed = _to_rel(ds.root)
+            if changed:
+                saved["dataset_root"] = ds.root
+                ds.root = new_root
+        try:
+            with open(save_directory / TRAIN_CONFIG_NAME, "w") as f, draccus.config_type("json"):
+                draccus.dump(self, f, indent=4)
+        finally:
+            if "output_dir" in saved:
+                self.output_dir = saved["output_dir"]
+            if "dataset_root" in saved:
+                self.dataset.root = saved["dataset_root"]
 
     @classmethod
     def from_pretrained(

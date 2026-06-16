@@ -212,6 +212,20 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         rename_map=cfg.rename_map,
     )
 
+    # 把训练集任务文字写进 policy config, 使 checkpoint 自包含 (inference --match-policy 直接
+    # 从 config.json 读 single_task, 不再依赖训练数据集是否还在)。仅单任务数据集写入。
+    try:
+        _tasks = list(dataset.meta.tasks.index)
+        if len(_tasks) == 1:
+            policy.config.single_task = str(_tasks[0])
+            if is_main_process:
+                logging.info(f"记录 single_task 到 checkpoint: {policy.config.single_task!r}")
+        elif is_main_process:
+            logging.info(f"数据集含 {len(_tasks)} 个任务, 不写单一 single_task (inference 需手动指定)")
+    except Exception as _e:
+        if is_main_process:
+            logging.warning(f"未能记录 single_task 到 checkpoint: {_e}")
+
     if cfg.peft is not None:
         from peft import PeftModel
 

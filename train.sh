@@ -1,9 +1,10 @@
 #!/bin/bash
-REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
+cd "$(dirname "$0")" || exit 1   # 切到脚本所在目录(仓库根), 服务器/本地通用, 无需手改
+REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行期, 不写进保存的 config)
 
 # ===================模型和数据集配置===================
 dataset_id=${1:-rm_umi_dual_pen_open}
-policy_type=${2:-starvla_groot}          # act | diffusion | pi05 | starvla_groot
+policy_type=${2:-diffusion}          # act | diffusion | pi05 | starvla_groot
 
 # 两个不同概念，按 policy_type 绑定：
 #   pretrained_path = 完整 policy 检查点（含 model.safetensors + 预/后处理器），
@@ -19,8 +20,8 @@ case "${policy_type}" in
   *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot)"; exit 1 ;;
 esac
 # ===================训练配置===================
-gpu_id=0,1,2,3
-num_processes=${3:-4}
+gpu_id=0
+num_processes=${3:-1}
 batch_size=${4:-32}
 steps=${5:-10_000}
 save_freq=5_000
@@ -55,11 +56,13 @@ wrist_cam=${WRIST_CAM:-'[observation.images.left_cam_wrist,observation.images.ri
 tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
 
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}"
+# 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
+run_name="$(date +%Y%m%d_%H%M%S)_${dataset_id}_${policy_type}_${policy_suffix}"
 
-# ===================路径配置===================
-dataset_root=${REPO_ROOT}/playground/data
-output_root=${REPO_ROOT}/playground/results/models
-output_dir=${output_root}/${dataset_id}_${policy_type}_${policy_suffix}
+# ===================路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)===================
+dataset_root=playground/data
+output_root=playground/results/models
+output_dir=${output_root}/${run_name}
 
 # ===================按 framework 拼装专属参数===================
 # 不同 framework 的配置字段不同（act/diffusion 没有 dtype/compile_model/
@@ -98,9 +101,9 @@ fi
 # ===================日志文件===================
 # 训练日志（含下面的参数打印 + accelerate/训练全部 stdout+stderr）保存到 output_dir 下，
 # 固定文件名 train.log，每次运行覆盖（只留最新）。终端仍实时显示（靠 tee）。
-log_dir=${REPO_ROOT}/playground/logs/models
+log_dir=playground/logs/models
 mkdir -p "${log_dir}"
-log_file="${log_dir}/${dataset_id}_${policy_type}_${policy_suffix}.log"
+log_file="${log_dir}/${run_name}.log"
 
 # 用花括号组把「参数打印 + 训练」整体管道给 tee，这样日志里既有配置也有训练过程。
 # 注：dash 不支持 set -o pipefail，脚本退出码会是 tee 的(0)；这是训练启动器，可接受。
@@ -137,7 +140,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id accelerate la
     --policy.push_to_hub=false \
     ${extra_args} \
     --output_dir=${output_dir} \
-    --job_name=${dataset_id}_${policy_type}_${policy_suffix} \
+    --job_name=${run_name} \
     --steps=${steps} \
     --save_freq=${save_freq} \
     --batch_size=${batch_size} \

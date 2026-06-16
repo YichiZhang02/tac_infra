@@ -46,8 +46,10 @@ def collect(cfg: RecordConfig):
         raise ValueError("collect 需要遥操作器: 请指定 --teleop.type=... (如 bi_realman_ugripper_leader)")
     if cfg.dataset.single_task is None:
         raise ValueError("collect 需要任务描述: 请指定 --dataset.single_task=\"...\"")
+
+    # 默认存到 playground/data/<repo_id 末段> (时间戳命名由调用方/bash 负责)
     if cfg.dataset.root is None:
-        cfg.dataset.root = f"playground/data/{cfg.dataset.repo_id}"
+        cfg.dataset.root = f"playground/data/{cfg.dataset.repo_id.split('/')[-1]}"
     return run_record(cfg)
 
 

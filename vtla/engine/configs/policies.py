@@ -84,6 +84,10 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # saved using `Policy.save_pretrained`. If not provided, the policy is initialized from scratch.
     pretrained_path: Path | None = None
 
+    # 训练集的任务文字 (单任务数据集时由训练写入), 使 checkpoint 自包含: 推理时直接读它作为
+    # VLA 语言指令, 不再依赖训练数据集是否还在。多任务/旧 checkpoint 为 None。
+    single_task: str | None = None
+
     def __post_init__(self) -> None:
         if not self.device or not is_torch_device_available(self.device):
             auto_device = auto_select_torch_device()

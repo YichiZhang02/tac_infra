@@ -1,6 +1,6 @@
-1 全部改成相对路径
+transformers版本
+
+优化diffusion policy
+
 2 动作改为可选择 joint delta_ee related_ee
 3 state兼容ee
-4 验证一下collect.py
-5 --match-policy=false时的inference.py  +  改成按照时间保存
-6 改为保存video而不是images

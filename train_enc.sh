@@ -1,5 +1,6 @@
 #!/bin/sh
-REPO_ROOT=/mnt/data/xidong_data/tac_infra    # 需调整为实际路径
+cd "$(dirname "$0")" || exit 1   # 切到脚本所在目录(仓库根), 服务器/本地通用, 无需手改
+REPO_ROOT="$(pwd)"               # 自动探测 (仅运行期用, 不写进保存的 config)
 
 # ===================触觉 backbone（Tactile MAE）预训练启动器===================
 # 复用 vtla/tac_encoder/tactile_mae，直接吃 LeRobot 数据训练 AnyTouch stage1 风格的 MAE。
@@ -14,7 +15,7 @@ arch=${3:-vit_b}                # vit_l | vit_b
 # pretrained_data 这类是「裸 frame_cache」：无 LeRobot meta，单路相机，需 --raw_frame_cache，
 # 且跳过 stage1 warm-up / 关闭 contact_filter。下面按 meta/info.json 是否存在自动判定；
 # 可用 RAW_FRAME_CACHE=1/0 强制覆盖。两类数据不能混在同一次训练里。
-_dsroot=${REPO_ROOT}/playground/data
+_dsroot=playground/data
 _has_lerobot=0; _has_raw=0
 for ds in ${dataset_ids}; do
   if [ -f "${_dsroot}/${ds}/meta/info.json" ]; then _has_lerobot=1; else _has_raw=1; fi
@@ -29,7 +30,7 @@ fi
 
 # 输出/日志命名标签：当前时间 + 数据集数量（如 20260603_210836_2ds），可用 RUN_NAME 覆盖
 num_datasets=$(echo "${dataset_ids}" | wc -w)
-run_tag=${RUN_NAME:-$(date +%Y_%m%d)}
+run_tag=${RUN_NAME:-$(date +%Y%m%d_%H%M%S)}   # 输出目录前缀带完整时间
 
 
 # ===================初始化权重（统一 pretrained_path，按 arch 选择）===================
@@ -37,7 +38,7 @@ run_tag=${RUN_NAME:-$(date +%Y_%m%d)}
 #   scratch  -> 空，随机初始化
 #   clip     -> HF CLIP 目录，加载 encoder+projection（有 B 和 L 两种）
 #   anytouch -> AnyTouch 权重（.pth 或转好的 HF 目录），strict 加载完整 MAE（仅 L）
-PM=${REPO_ROOT}/playground/pretrained_models
+PM=playground/pretrained_models
 pretrained_path=
 case "${init_mode}" in
   scratch)
@@ -113,11 +114,11 @@ fi
 raw_args=
 if [ "${raw_frame_cache}" = "1" ]; then raw_args="--raw_frame_cache"; fi
 
-# ===================路径配置===================
-dataset_root=${REPO_ROOT}/playground/data
-output_root=${REPO_ROOT}/playground/results/backbones
+# ===================路径配置 (相对路径, 跨机器可移植)===================
+dataset_root=playground/data
+output_root=playground/results/backbones
 output_dir=${output_root}/${run_tag}_tacmae_${arch}_from_${init_mode}
-log_root=${REPO_ROOT}/playground/logs/backbones
+log_root=playground/logs/backbones
 mkdir -p "${output_dir}" "${log_root}"
 log_file="${log_root}/${run_tag}_tacmae_${arch}_${init_mode}.log"
 

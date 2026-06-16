@@ -1084,7 +1084,17 @@ class VideoEncodingManager:
         writer = self.dataset.writer
         if writer is not None:
             if exc_type is not None and writer._streaming_encoder is not None:
-                writer.cancel_pending_videos()
+                # 流式编码中断时: 若 episode buffer 里有帧则尝试保存 (推理模式 Ctrl-C 也能留视频),
+                # 否则 (未开始录或已保存过) 直接取消。
+                buf = writer.episode_buffer
+                has_frames = buf is not None and buf.get("size", 0) > 0
+                if has_frames:
+                    try:
+                        self.dataset.save_episode()
+                    except Exception:
+                        writer.cancel_pending_videos()
+                else:
+                    writer.cancel_pending_videos()
 
             # finalize() handles flush_pending_videos + parquet + metadata
             self.dataset.finalize()

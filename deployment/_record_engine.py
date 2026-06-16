@@ -539,6 +539,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
             sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
         else:
             # episode 模式创建标准 LeRobotDataset
+            # 推理模式 (有 policy) 用流式编码: 直接写 MP4, 不落 PNG 文件
+            _inference_mode = cfg.policy is not None
             sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
             dataset = LeRobotDataset.create(
                 cfg.dataset.repo_id,
@@ -547,8 +549,9 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                 robot_type=robot.name,
                 features=dataset_features,
                 use_videos=cfg.dataset.video,
+                streaming_encoding=_inference_mode,
                 image_writer_processes=cfg.dataset.num_image_writer_processes,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                image_writer_threads=0 if _inference_mode else cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
             )
     else:
@@ -593,8 +596,43 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
+                # 推理模式标志: 有 policy、无 teleop、且机器人支持自动复位
+                auto_home = (policy is not None and teleop is None
+                             and hasattr(robot, "move_to_home"))
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                    log_say(f"正在记录中,..., 按<-方向键复位重新开始, 按->方向键保存 , episode {dataset.num_episodes}", cfg.play_sounds)
+
+                    # ── 推理模式: episode 开始前自动复位, 等用户按→确认 ─────────
+                    if auto_home:
+                        log_say(
+                            f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}: 机械臂复位中...",
+                            cfg.play_sounds,
+                        )
+                        robot.move_to_home()
+                        log_say("复位完成 按→开始", cfg.play_sounds)
+                        # 清除复位期间可能残留的按键事件, 等待用户主动按→
+                        events["exit_early"] = False
+                        events["rerecord_episode"] = False
+                        while not events["exit_early"] and not events["stop_recording"]:
+                            time.sleep(0.05)
+                        if events["stop_recording"]:
+                            break
+                        # ← 在等待阶段被按下 → 重新复位 (不开始录制)
+                        if events["rerecord_episode"]:
+                            events["rerecord_episode"] = False
+                            events["exit_early"] = False
+                            continue
+                        events["exit_early"] = False  # 消费"开始"触发
+                        logging.info(
+                            f"[auto_home] 开始推理 episode {dataset.num_episodes + 1}"
+                        )
+                    # ── 遥操模式: 仅打印提示 ────────────────────────────────────
+                    else:
+                        log_say(
+                            f"正在记录中,..., 按<-方向键复位重新开始, 按->方向键保存 , episode {dataset.num_episodes}",
+                            cfg.play_sounds,
+                        )
+
+                    # ── 主录制循环 ────────────────────────────────────────────
                     record_loop(
                         robot=robot,
                         events=events,
@@ -613,8 +651,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         display_data=cfg.display_data,
                     )
 
-                    # 跳过最后一集的 reset
-                    if not events["stop_recording"] and (
+                    # ── 遥操模式: 等待人工还原场景 (推理模式跳过, 下次循环自动复位) ─
+                    if not auto_home and not events["stop_recording"] and (
                         (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
                     ):
                         log_say("复位中, 进行桌面场景还原.,Reset the environment", cfg.play_sounds)
@@ -632,8 +670,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             display_data=cfg.display_data,
                         )
 
+                    # ── 重录判断 ─────────────────────────────────────────────
                     if events["rerecord_episode"]:
-                        log_say("复位中..., 可以开始操作,Re-record episode", cfg.play_sounds)
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
                         dataset.clear_episode_buffer()
@@ -658,8 +696,32 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
                 recorded_episodes = 0
                 episode_index = episode_start
+                auto_home_stream = (policy is not None and teleop is None
+                                    and hasattr(robot, "move_to_home"))
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                    log_say(f"Recording stream episode {episode_index}", cfg.play_sounds)
+
+                    # ── 推理模式: 开始前自动复位, 等用户按→确认 ───────────────
+                    if auto_home_stream:
+                        log_say(
+                            f"Stream episode {episode_index + 1}: 机械臂复位中...",
+                            cfg.play_sounds,
+                        )
+                        robot.move_to_home()
+                        log_say("复位完成 按→开始", cfg.play_sounds)
+                        events["exit_early"] = False
+                        events["rerecord_episode"] = False
+                        while not events["exit_early"] and not events["stop_recording"]:
+                            time.sleep(0.05)
+                        if events["stop_recording"]:
+                            break
+                        if events["rerecord_episode"]:
+                            events["rerecord_episode"] = False
+                            events["exit_early"] = False
+                            continue
+                        events["exit_early"] = False
+                    else:
+                        log_say(f"Recording stream episode {episode_index}", cfg.play_sounds)
+
                     stream_writer.start_episode(episode_index)
                     record_loop(
                         robot=robot,
@@ -680,7 +742,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         display_data=cfg.display_data,
                     )
 
-                    if not events["stop_recording"] and (
+                    if not auto_home_stream and not events["stop_recording"] and (
                         (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
                     ):
                         log_say("Reset the environment", cfg.play_sounds)
@@ -699,7 +761,6 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         )
 
                     if events["rerecord_episode"]:
-                        log_say("Re-record episode", cfg.play_sounds)
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
                         stream_writer.close_episode(discard=True)

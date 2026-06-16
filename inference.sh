@@ -14,7 +14,7 @@ echo "测试policy: ${policy_path}"
 
 # 按时间命名: local/<时间戳>_<基础名>
 name=${pretrained_id}_step_${step}    
-repo_id="local/$(date +%Y%m%d_%H%M%S)_${name}"
+repo_id="local/eval_$(date +%Y%m%d_%H%M%S)_${name}"
 echo "录制数据集: ${repo_id}  ->  playground/eval/${repo_id##*/}"
 
 # =================== 启动 (match_policy 自动对齐硬件 + 任务) ===================

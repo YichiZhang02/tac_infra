@@ -162,6 +162,33 @@ class RealmanTcpFollower(FollowerArmBase):
             logger.warning(f"[{self.name}] 发送关节动作失败, 错误码: {ret}")
         return ret
 
+    def move_to(self, target_positions, duration_s: float = 4.0, fps: float = 30.0) -> None:
+        """平滑运动到目标关节位置 (cosine ease-in/out 插值, 通过 rm_movej_canfd 分步执行)。
+
+        target_positions: 与 send_joints / read_joints 单位相同 (取决于 use_degrees 配置)。
+        """
+        if self._arm is None:
+            return
+
+        current = self.read_joints_now()
+        if current is None:
+            current = self.read_joints()
+
+        target = np.asarray(target_positions, dtype=float)
+        start = np.asarray(current, dtype=float)
+
+        n_steps = max(1, int(duration_s * fps))
+        dt = duration_s / n_steps
+
+        for i in range(1, n_steps + 1):
+            t = i / n_steps
+            t_smooth = 0.5 * (1.0 - np.cos(np.pi * t))
+            interp = start + (target - start) * t_smooth
+            self.send_joints(interp.tolist())
+            time.sleep(dt)
+
+        logger.info(f"[{self.name}] move_to 完成")
+
     def disconnect(self) -> None:
         if self._reader is not None:
             try:

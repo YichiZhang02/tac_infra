@@ -105,6 +105,10 @@ class RealmanUGripperDual(Robot):
         # 额外本地相机 (默认无)
         self.cameras = make_top_cameras_from_configs(config.cameras)
 
+        # 各臂 home 目标关节位置 (单位同 read_joints / send_joints, 即 use_degrees 决定)
+        # connect() 后由 _capture_home_joints() 填充
+        self._home_joints: dict[str, list[float]] = {}
+
     # ==================== 配置辅助 ====================
 
     def _board_ip(self, side: str) -> str:
@@ -231,6 +235,7 @@ class RealmanUGripperDual(Robot):
         self.configure()
 
         time.sleep(0.5)
+        self._capture_home_joints()
         logger.info(f"{self} 连接完成 (ugripper 双臂, 启用: {self.config.arms})")
 
     def _connect_one_arm(self, side: str) -> None:
@@ -400,6 +405,68 @@ class RealmanUGripperDual(Robot):
 
     def configure(self) -> None:
         logger.info(f"配置 {self}...")
+
+    # ==================== 初始位置复位 ====================
+
+    def _capture_home_joints(self) -> None:
+        """连接完成后读取各臂当前关节位置作为 home 目标 (优先 config.home_joints)。"""
+        for side, arm in self._arms.items():
+            if arm.follower is None:
+                continue
+            if self.config.home_joints is not None:
+                target = [
+                    self.config.home_joints.get(f"{side}_{j}", 0.0)
+                    for j in self.JOINT_NAMES
+                ]
+                logger.info(f"[{side}] home 位置来自 config: {target}")
+            else:
+                pos = arm.follower.read_joints_now()
+                if pos is None:
+                    pos = arm.follower.read_joints()
+                target = list(pos)
+                logger.info(f"[{side}] home 位置自动捕获 (当前姿态): {target}")
+            self._home_joints[side] = target
+
+    def move_to_home(self) -> None:
+        """机械臂和夹爪复位到初始位置 (推理时按→保存后调用)。
+
+        流程: 先立即张开夹爪 (非阻塞), 再并行将双臂平滑插值到 home 位置。
+        """
+        if not self.is_connected:
+            logger.warning("move_to_home: 机器人未连接, 跳过")
+            return
+
+        # 1. 立即张开夹爪 (与臂运动并行)
+        for side, arm in self._arms.items():
+            if arm.gripper is not None:
+                try:
+                    arm.gripper.move_norm(self.config.home_gripper)
+                    logger.info(f"[{side}] 夹爪复位: {self.config.home_gripper:.2f}")
+                except Exception as e:
+                    logger.warning(f"[{side}] 夹爪复位出错: {e}")
+
+        # 2. 双臂并行平滑运动到 home 位置
+        def _home_arm(side: str, arm: _ArmDevices) -> None:
+            target = self._home_joints.get(side)
+            if target is None:
+                logger.warning(f"[{side}] home 位置未记录, 跳过臂复位")
+                return
+            logger.info(f"[{side}] 机械臂复位目标: {[f'{v:.3f}' for v in target]}")
+            try:
+                arm.follower.move_to(target, duration_s=self.config.home_duration_s)
+                logger.info(f"[{side}] 机械臂复位完成")
+            except Exception as e:
+                logger.warning(f"[{side}] 机械臂复位出错: {e}")
+
+        threads = [
+            threading.Thread(target=_home_arm, args=(side, arm), name=f"home-{side}")
+            for side, arm in self._arms.items()
+            if arm.follower is not None
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     # ==================== 读取观测 ====================
 

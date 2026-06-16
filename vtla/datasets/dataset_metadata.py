@@ -120,9 +120,15 @@ class LeRobotDatasetMetadata:
 
         combined_dict = {}
         for episode_dict in self._metadata_buffer:
+            n_prev = len(next(iter(combined_dict.values()), []))
+            # Pad any existing key that is absent from this episode
+            for key in combined_dict:
+                if key not in episode_dict:
+                    combined_dict[key].append(None)
             for key, value in episode_dict.items():
                 if key not in combined_dict:
-                    combined_dict[key] = []
+                    # New key first seen in this episode — backfill previous episodes with None
+                    combined_dict[key] = [None] * n_prev
                 # Extract value and serialize numpy arrays
                 # because PyArrow's from_pydict function doesn't support numpy arrays
                 val = value[0] if isinstance(value, list) else value

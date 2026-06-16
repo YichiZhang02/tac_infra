@@ -1,7 +1,3 @@
-transformers版本冲突 pi05和qwen3.5
-
-优化diffusion policy 现在的训练时间太长了
-
 动作和state兼容joint related_ee
 
 重新验证整个infra 并加上更多文档

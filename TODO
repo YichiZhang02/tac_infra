@@ -1,6 +1,7 @@
-transformers版本
+transformers版本冲突 pi05和qwen3.5
 
-优化diffusion policy
+优化diffusion policy 现在的训练时间太长了
 
-2 动作改为可选择 joint delta_ee related_ee
-3 state兼容ee
+动作和state兼容joint related_ee
+
+重新验证整个infra 并加上更多文档

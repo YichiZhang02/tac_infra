@@ -51,6 +51,7 @@ from vtla.engine.utils.utils import (
     init_logging,
     inside_slurm,
 )
+from vtla.engine.processor.relative_action_processor import route_ee_batch
 from vtla.frameworks.factory import make_policy, make_pre_post_processors
 from vtla.frameworks.pretrained import PreTrainedPolicy
 
@@ -241,14 +242,18 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     active_cfg = cfg.trainable_config
     processor_pretrained_path = active_cfg.pretrained_path
-    if (
+    # EE modes (episode_ee / relative_ee) and joint relative actions change the processor's feature
+    # dims and steps, so the pretrained checkpoint's processor must NOT be reused — rebuild it from
+    # the current policy config (with the EE stats remap + pose relative/absolute steps).
+    _needs_rebuilt_processor = (
         getattr(active_cfg, "use_relative_actions", False)
-        and processor_pretrained_path is not None
-        and not cfg.resume
-    ):
+        or getattr(active_cfg, "state_mode", "joint") == "episode_ee"
+        or getattr(active_cfg, "action_mode", "joint") == "relative_ee"
+    )
+    if _needs_rebuilt_processor and processor_pretrained_path is not None and not cfg.resume:
         logging.warning(
-            "use_relative_actions=true with pretrained processors can skip relative transforms if "
-            "the checkpoint processors do not define them. Building processors from current policy config."
+            "Relative/EE action or episode_ee state mode is set: building processors from the current "
+            "policy config instead of the pretrained checkpoint (whose processor has different dims/steps)."
         )
         processor_pretrained_path = None
 
@@ -384,6 +389,12 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
+        # Select joint vs EE columns as the canonical observation.state / action before the processor.
+        batch = route_ee_batch(
+            batch,
+            getattr(active_cfg, "state_mode", "joint"),
+            getattr(active_cfg, "action_mode", "joint"),
+        )
         for cam_key in dataset.meta.camera_keys:
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:
                 batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0

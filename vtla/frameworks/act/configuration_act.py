@@ -177,6 +177,7 @@ class ACTConfig(SensorRoutingMixin, PreTrainedConfig):
         # Route cameras (wrist_only) + tactile (as_image) + state via the shared mixin.
         self.prune_unselected_visual_features()
         self.apply_state_mode()
+        self.apply_action_mode()
         self.validate_routed_keys()
 
         if not self.image_features and not self.env_state_feature:
@@ -188,6 +189,10 @@ class ACTConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
+        # relative_ee predicts the future trajectory relative to the current observation, so the
+        # chunk starts at t+1 (k=0 would be the current pose => identity). Joint keeps the t convention.
+        if self.action_mode == "relative_ee":
+            return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
     @property

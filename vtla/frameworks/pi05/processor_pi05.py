@@ -23,7 +23,6 @@ import torch
 
 from vtla.engine.configs import PipelineFeatureType, PolicyFeature
 from vtla.engine.processor import (
-    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
@@ -31,7 +30,6 @@ from vtla.engine.processor import (
     PolicyProcessorPipeline,
     ProcessorStep,
     ProcessorStepRegistry,
-    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     TokenizerProcessorStep,
     UnnormalizerProcessorStep,
@@ -44,6 +42,7 @@ from vtla.engine.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
+from vtla.frameworks.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
 
 from .configuration_pi05 import PI05Config
 
@@ -62,10 +61,10 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         transition = transition.copy()
 
-        if self.state_mode not in ["none", "joint", "ee"]:
+        if self.state_mode not in ["none", "joint", "episode_ee"]:
             raise ValueError(
                 f"Invalid PI05 state_mode: {self.state_mode}. "
-                "Expected one of: 'none', 'joint', 'ee'."
+                "Expected one of: 'none', 'joint', 'episode_ee'."
             )
 
         tasks = transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).get(self.task_key)
@@ -74,13 +73,8 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
         if isinstance(tasks, str):
             tasks = [tasks]
 
-        if self.state_mode == "ee":
-            raise NotImplementedError(
-                "PI05 state_mode='ee' is reserved for end-effector pose conditioning, "
-                "but it is not implemented yet. Future integration should provide EE pose "
-                "from dataset fields or forward kinematics before building the PI05 prompt."
-            )
-
+        # episode_ee is treated like joint here: the (already normalized) proprio state vector is
+        # discretized into the prompt. The only difference is its semantics/dim (EE pose vs joints).
         full_prompts = []
         if self.state_mode == "none":
             for task in tasks:
@@ -164,11 +158,10 @@ def make_pi05_pre_post_processors(
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
 
-    relative_step = RelativeActionsProcessorStep(
-        enabled=config.use_relative_actions,
-        exclude_joints=getattr(config, "relative_exclude_joints", []),
-        action_names=getattr(config, "action_feature_names", None),
-    )
+    # EE modes: batch routing (see route_ee_batch) already put the episode_ee state and action_episode_ee
+    # under the canonical observation.state / action keys, so remap the normalization stats to match.
+    dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
+    relative_step, _absolute_step = make_ee_relative_steps(config)
 
     processor_features = {**config.normalizer_input_features(), **config.output_features}
 
@@ -201,7 +194,7 @@ def make_pi05_pre_post_processors(
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
-        AbsoluteActionsProcessorStep(enabled=config.use_relative_actions, relative_step=relative_step),
+        _absolute_step,
         DeviceProcessorStep(device="cpu"),
     ]
 

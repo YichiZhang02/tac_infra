@@ -133,6 +133,7 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
         empty_keys = tuple(self.add_empty_cameras(self.empty_cameras, self.image_resolution))
         self.prune_unselected_visual_features(extra_keep=empty_keys)
         self.apply_state_mode()  # real state dim is read from features by the policy
+        self.apply_action_mode()
         self.validate_routed_keys()
 
         if ACTION not in self.output_features:
@@ -161,6 +162,10 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
+        # relative_ee predicts the future trajectory relative to the current observation, so the
+        # chunk starts at t+1 (k=0 would be the current pose => identity). Joint keeps the t convention.
+        if self.action_mode == "relative_ee":
+            return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
     @property

@@ -30,10 +30,15 @@ log_freq=100
 # ===================视觉/触觉路由（四个 framework 通用）===================
 # wrist_only: true 只用 wrist 相机; false 用 top + wrist
 # tactile_mode: none(触觉不进模型) / as_image(触觉作为图像输入) / encode(触觉 encoder, 预留未实现)
-# state_mode: none(完全不用 state) / joint(关节角) / ee(末端位姿，当前预留未实现)
+# state_mode:  none(不用 state) / joint(关节角) / episode_ee(末端位姿，相对每个 episode 首帧)
+# action_mode: joint(关节角) / relative_ee(末端位姿，相对当前观测)
+#   EE 模式前置：数据集需先用 `python -m vtla.datasets.convert_joints_to_eepose --root <dataset>`
+#   生成 observation.state_episode_ee / action_episode_ee / action_relative_ee(stats) 三项。
+#   约束：action_mode=relative_ee 必须配 state_mode=episode_ee。两者默认 joint（与原行为一致）。
 wrist_only=${6:-false}
 tactile_mode=${7:-none}
 state_mode=${8:-joint}
+action_mode=${9:-joint}
 
 # tactile encoder（仅 tactile_mode=encode 时生效）
 #   tactile_encoder_path: tactile-MAE 权重（.pth）或 HF 目录，作为 encoder 初始化；
@@ -41,8 +46,8 @@ state_mode=${8:-joint}
 #     注意：encode 模式下 tactile-MAE encoder + query token 会随 policy 一起训练（非冻结）。
 #   tactile_insert_location: encoder | decoder（Diffusion 忽略该项）。
 #   tactile_num_tokens: 每张触觉图的可学习 query token 数（默认 8）；总 token = 指数 × 该值。
-tactile_encoder_path=${TACTILE_ENCODER_PATH:-${9:-playground/pretrained_models/AnyTouch-ViT-L-16}}
-tactile_insert_location=${TACTILE_INSERT_LOCATION:-${10:-encoder}}
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${10:-playground/pretrained_models/AnyTouch-ViT-L-16}}
+tactile_insert_location=${TACTILE_INSERT_LOCATION:-${11:-encoder}}
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-8}
 
 # ===================相机 / 触觉 key（按数据集命名调整，均支持多路）===================
@@ -55,7 +60,7 @@ top_cam=${TOP_CAM:-'[observation.images.cam_top]'}
 wrist_cam=${WRIST_CAM:-'[observation.images.left_cam_wrist,observation.images.right_cam_wrist]'}
 tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
 
-policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}"
+policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}"
 # 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
 run_name="$(date +%Y%m%d_%H%M%S)_${dataset_id}_${policy_type}_${policy_suffix}"
 
@@ -113,7 +118,7 @@ echo "Training with dataset: $dataset_id"
 echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
-echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode"
+echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode | Action mode: $action_mode"
 echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
 echo "Tactile keys:   ${tactile_keys}"
@@ -133,6 +138,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} CUDA_VISIBLE_DEVICES=$gpu_id accelerate la
     --policy.wrist_only=${wrist_only} \
     --policy.tactile_mode=${tactile_mode} \
     --policy.state_mode=${state_mode} \
+    --policy.action_mode=${action_mode} \
     --policy.top_camera_keys="${top_cam}" \
     --policy.wrist_camera_keys="${wrist_cam}" \
     --policy.tactile_keys="${tactile_keys}" \

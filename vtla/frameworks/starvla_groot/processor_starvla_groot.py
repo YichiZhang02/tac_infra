@@ -42,6 +42,7 @@ from vtla.engine.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
+from vtla.frameworks.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
 
 from .configuration_starvla_groot import StarvlaGrootConfig
 
@@ -53,11 +54,17 @@ def make_starvla_groot_pre_post_processors(
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
 ]:
+    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to canonical keys and
+    # convert action to/from the relative EE pose. No-op for joint modes.
+    dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
+    relative_step, absolute_step = make_ee_relative_steps(config)
+
     processor_features = {**config.normalizer_input_features(), **config.output_features}
 
     input_steps: list[ProcessorStep] = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+        relative_step,
         NormalizerProcessorStep(
             features=processor_features,
             norm_map=config.normalization_mapping,
@@ -72,6 +79,7 @@ def make_starvla_groot_pre_post_processors(
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
+        absolute_step,
         DeviceProcessorStep(device="cpu"),
     ]
 

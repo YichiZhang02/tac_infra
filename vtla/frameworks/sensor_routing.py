@@ -32,12 +32,20 @@ raise ``NotImplementedError`` consistently across all policies.
 from dataclasses import dataclass, field
 
 from vtla.engine.configs import FeatureType, PolicyFeature
-from vtla.engine.utils.constants import OBS_IMAGES, OBS_STATE
+from vtla.engine.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 VALID_TACTILE_MODES = ("none", "as_image", "encode")
-VALID_STATE_MODES = ("none", "joint", "ee")
+# joint = joint angles; episode_ee = end-effector pose relative to each episode's FIRST frame.
+VALID_STATE_MODES = ("none", "joint", "episode_ee")
+# joint = joint targets; relative_ee = EE pose relative to the CURRENT observation (delta).
+VALID_ACTION_MODES = ("joint", "relative_ee")
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
 VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
+
+# Dataset columns / stats keys added offline by vtla/datasets/convert_joints_to_eepose.py.
+OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"  # observation.state_episode_ee
+ACTION_EPISODE_EE = ACTION + "_episode_ee"  # action_episode_ee (per-frame absolute-in-episode)
+ACTION_RELATIVE_EE = ACTION + "_relative_ee"  # stats-only key: relative action St^-1·S_{t+k}
 
 
 @dataclass
@@ -92,8 +100,11 @@ class SensorRoutingMixin:
     # backbone and train only the query tokens + projection.
     freeze_tactile_encoder: bool = False
 
-    # --- state routing ---
-    state_mode: str = "joint"  # none | joint | ee
+    # --- state / action routing ---
+    state_mode: str = "joint"  # none | joint | episode_ee
+    action_mode: str = "joint"  # joint | relative_ee
+    # Number of arms packed in the EE vectors (per arm = 3 pos + 6 rot6d + 1 gripper = 10 dims).
+    ee_num_arms: int = 2
 
     # ------------------------------------------------------------------
     # Key resolution
@@ -174,6 +185,13 @@ class SensorRoutingMixin:
             )
         if self.state_mode not in VALID_STATE_MODES:
             raise ValueError(f"Invalid state_mode '{self.state_mode}'. Expected one of {VALID_STATE_MODES}.")
+        if self.action_mode not in VALID_ACTION_MODES:
+            raise ValueError(f"Invalid action_mode '{self.action_mode}'. Expected one of {VALID_ACTION_MODES}.")
+        if self.action_mode == "relative_ee" and self.state_mode != "episode_ee":
+            raise ValueError(
+                "action_mode='relative_ee' requires state_mode='episode_ee': the relative action is "
+                "computed against observation.state_episode_ee (the current EE observation)."
+            )
         if self.tactile_encoder_type not in VALID_TACTILE_ENCODERS:
             raise ValueError(
                 f"Invalid tactile_encoder_type '{self.tactile_encoder_type}'. "
@@ -233,21 +251,56 @@ class SensorRoutingMixin:
     def apply_state_mode(self, padded_state_dim: int | None = None) -> None:
         """Route the proprioceptive state according to ``state_mode``.
 
-        - ``none``: remove ``observation.state``.
-        - ``ee``:   reserved → ``NotImplementedError``.
-        - ``joint``: keep; if ``padded_state_dim`` is given and state is missing,
-                     materialise a padded state feature (pi05-style).
+        The dataset carries BOTH ``observation.state`` (joint) and
+        ``observation.state_episode_ee`` (EE). This selects one as the canonical
+        ``observation.state`` the model consumes and drops the unselected variant.
+
+        - ``none``: remove ``observation.state`` (both variants).
+        - ``joint``: keep joint ``observation.state``, drop the EE variant; if
+                     ``padded_state_dim`` is given and state is missing, materialise a
+                     padded state feature (pi05-style).
+        - ``episode_ee``: use ``observation.state_episode_ee`` as ``observation.state``,
+                          drop the joint variant.
         """
         if self.state_mode == "none":
             self.input_features.pop(OBS_STATE, None)
-        elif self.state_mode == "ee":
-            raise NotImplementedError(
-                "state_mode='ee' (end-effector pose conditioning) is reserved and not implemented yet."
-            )
+            self.input_features.pop(OBS_STATE_EPISODE_EE, None)
         elif self.state_mode == "joint":
+            self.input_features.pop(OBS_STATE_EPISODE_EE, None)
             if padded_state_dim is not None and OBS_STATE not in self.input_features:
                 self.input_features[OBS_STATE] = PolicyFeature(
                     type=FeatureType.STATE, shape=(padded_state_dim,)
+                )
+        elif self.state_mode == "episode_ee":
+            ee_ft = self.input_features.pop(OBS_STATE_EPISODE_EE, None)
+            self.input_features.pop(OBS_STATE, None)
+            if ee_ft is not None:
+                self.input_features[OBS_STATE] = ee_ft
+            elif OBS_STATE not in self.input_features:
+                raise ValueError(
+                    f"state_mode='episode_ee' requires '{OBS_STATE_EPISODE_EE}' in the dataset. "
+                    "Run vtla/datasets/convert_joints_to_eepose.py first."
+                )
+
+    def apply_action_mode(self) -> None:
+        """Route the action according to ``action_mode`` (mirrors :meth:`apply_state_mode`).
+
+        The dataset carries BOTH ``action`` (joint) and ``action_episode_ee`` (EE). This
+        selects one as the canonical ``action`` output and drops the unselected variant.
+        """
+        if self.output_features is None:
+            return
+        if self.action_mode == "joint":
+            self.output_features.pop(ACTION_EPISODE_EE, None)
+        elif self.action_mode == "relative_ee":
+            ee_ft = self.output_features.pop(ACTION_EPISODE_EE, None)
+            self.output_features.pop(ACTION, None)
+            if ee_ft is not None:
+                self.output_features[ACTION] = ee_ft
+            elif ACTION not in self.output_features:
+                raise ValueError(
+                    f"action_mode='relative_ee' requires '{ACTION_EPISODE_EE}' in the dataset. "
+                    "Run vtla/datasets/convert_joints_to_eepose.py first."
                 )
 
     def add_empty_cameras(self, num: int, image_resolution: tuple[int, int]) -> list[str]:

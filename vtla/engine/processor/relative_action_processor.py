@@ -21,7 +21,30 @@ from torch import Tensor
 
 from vtla.engine.configs import PipelineFeatureType, PolicyFeature
 from vtla.engine.types import EnvTransition, TransitionKey
-from vtla.engine.utils.constants import OBS_STATE
+from vtla.engine.utils.constants import ACTION, OBS_STATE
+from vtla.engine.utils.ee_transforms import ee_to_absolute, ee_to_relative
+
+OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"
+ACTION_EPISODE_EE = ACTION + "_episode_ee"
+
+
+def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
+    """Select EE columns as the canonical ``observation.state`` / ``action`` (in place).
+
+    The dataset carries both joint and EE columns; ``state_mode`` / ``action_mode`` pick which the
+    model consumes. Done at the batch level (before the processor) because ``action_episode_ee`` is
+    not the literal ``action`` key and would otherwise be dropped by ``batch_to_transition``.
+    Mutates and returns ``batch``.
+    """
+    if state_mode == "episode_ee" and OBS_STATE_EPISODE_EE in batch:
+        batch[OBS_STATE] = batch.pop(OBS_STATE_EPISODE_EE)
+        if OBS_STATE_EPISODE_EE + "_is_pad" in batch:
+            batch[OBS_STATE + "_is_pad"] = batch.pop(OBS_STATE_EPISODE_EE + "_is_pad")
+    if action_mode == "relative_ee" and ACTION_EPISODE_EE in batch:
+        batch[ACTION] = batch.pop(ACTION_EPISODE_EE)
+        if ACTION_EPISODE_EE + "_is_pad" in batch:
+            batch[ACTION + "_is_pad"] = batch.pop(ACTION_EPISODE_EE + "_is_pad")
+    return batch
 
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep
 from .pipeline import ProcessorStep, ProcessorStepRegistry
@@ -101,6 +124,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
     enabled: bool = False
     exclude_joints: list[str] = field(default_factory=list)
     action_names: list[str] | None = None
+    # mode="joint": element-wise action-=state (exclude_joints masked).
+    # mode="pose":  SE(3) per-arm relative EE (St^-1 . action), gripper kept absolute. Used by
+    #               action_mode="relative_ee"; exclude_joints is ignored (gripper handled internally).
+    mode: str = "joint"
+    n_arms: int = 2
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
@@ -126,7 +154,13 @@ class RelativeActionsProcessorStep(ProcessorStep):
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
 
-        # Always cache state for the paired AbsoluteActionsProcessorStep
+        # In pose mode the reference is a single EE pose per sample. Policies with a multi-step
+        # observation window (e.g. diffusion: state is (B, n_obs, D)) collapse to the most recent
+        # frame (t=0) as the relativization anchor.
+        if state is not None and self.mode == "pose" and state.ndim == 3:
+            state = state[:, -1]
+
+        # Always cache the (resolved) state for the paired AbsoluteActionsProcessorStep
         if state is not None:
             self._last_state = state
 
@@ -138,8 +172,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
         if action is None or state is None:
             return new_transition
 
-        mask = self._build_mask(action.shape[-1])
-        new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
+        if self.mode == "pose":
+            new_transition[TransitionKey.ACTION] = ee_to_relative(state, action, n_arms=self.n_arms)
+        else:
+            mask = self._build_mask(action.shape[-1])
+            new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
         return new_transition
 
     def get_cached_state(self) -> torch.Tensor | None:
@@ -151,6 +188,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "enabled": self.enabled,
             "exclude_joints": self.exclude_joints,
             "action_names": self.action_names,
+            "mode": self.mode,
+            "n_arms": self.n_arms,
         }
 
     def transform_features(
@@ -198,8 +237,13 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
         if action is None:
             return new_transition
 
-        mask = self.relative_step._build_mask(action.shape[-1])
-        new_transition[TransitionKey.ACTION] = to_absolute_actions(action, cached_state, mask)
+        if self.relative_step.mode == "pose":
+            new_transition[TransitionKey.ACTION] = ee_to_absolute(
+                cached_state, action, n_arms=self.relative_step.n_arms
+            )
+        else:
+            mask = self.relative_step._build_mask(action.shape[-1])
+            new_transition[TransitionKey.ACTION] = to_absolute_actions(action, cached_state, mask)
         return new_transition
 
     def get_config(self) -> dict[str, Any]:

@@ -219,6 +219,7 @@ class DiffusionConfig(SensorRoutingMixin, PreTrainedConfig):
         # Route cameras (wrist_only) + tactile (as_image) + state via the shared mixin.
         self.prune_unselected_visual_features()
         self.apply_state_mode()
+        self.apply_action_mode()
         self.validate_routed_keys()
 
         if len(self.image_features) == 0 and self.env_state_feature is None:

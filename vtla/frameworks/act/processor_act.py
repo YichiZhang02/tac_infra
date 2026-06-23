@@ -29,6 +29,7 @@ from vtla.engine.processor import (
     transition_to_policy_action,
 )
 from vtla.engine.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
+from vtla.frameworks.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
 
 from .configuration_act import ACTConfig
 
@@ -55,9 +56,16 @@ def make_act_pre_post_processors(
         pre-processor pipeline and the post-processor pipeline.
     """
 
+    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to the canonical keys
+    # and convert action to/from the relative EE pose (raw -> relative -> normalize -> model ->
+    # unnormalize -> absolute). No-op for joint modes.
+    dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
+    relative_step, absolute_step = make_ee_relative_steps(config)
+
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+        relative_step,
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features={**config.normalizer_input_features(), **config.output_features},
@@ -70,6 +78,7 @@ def make_act_pre_post_processors(
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
+        absolute_step,
         DeviceProcessorStep(device="cpu"),
     ]
 

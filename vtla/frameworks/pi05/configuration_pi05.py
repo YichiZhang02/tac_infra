@@ -153,6 +153,8 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
         self.prune_unselected_visual_features(extra_keep=empty_keys)
         # PI05 pads state to max_state_dim and materialises it when missing (joint mode).
         self.apply_state_mode(padded_state_dim=self.max_state_dim)
+        # Select joint vs EE action as the canonical `action` output feature.
+        self.apply_action_mode()
         self.validate_routed_keys()
 
         if ACTION not in self.output_features:
@@ -184,6 +186,11 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
+        # relative_ee predicts the FUTURE trajectory relative to the current observation, so the
+        # action chunk starts at t+1 (k=0 would be the current pose => identity, wasted). Joint mode
+        # keeps the openpi convention of starting at the current frame (t).
+        if self.action_mode == "relative_ee":
+            return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
     @property

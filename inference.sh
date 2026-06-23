@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-rm_umi_dual_pen_open_starvla_groot_wristonly_false_tactile_none_state_joint}
+pretrained_id=${1:-20260623_162109_rm_umi_dual_260618_pick_majiang_256_diffusion_wristonly_false_tactile_none_state_joint_action_joint}
 step=${2:-5000}
 
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
@@ -22,7 +22,9 @@ python -m deployment.inference \
   --robot.type=realman_ugripper_dual \
   --policy.path=${policy_path} \
   --dataset.repo_id=${repo_id} \
-  --match_policy=true
+  --match_policy=true \
+  --robot.home_joints='{"left_main_joint1": -0.091996, "left_main_joint2": 0.200154, "left_main_joint3": 0.062090, "left_main_joint4": 0.916534, "left_main_joint5": -0.040657, "left_main_joint6": 1.984177, "left_main_joint7": -0.111946, "right_main_joint1": 0.091996, "right_main_joint2": 0.200154, "right_main_joint3": -0.062090, "right_main_joint4": 0.916534, "right_main_joint5": 0.040657, "right_main_joint6": 1.984177, "right_main_joint7": 0.111946}' \
+  --robot.home_gripper=1.0
 
 # --- 手动模式示例 (关掉自动对齐时, 硬件/任务需自己给) ---
 # python -m deployment.inference \

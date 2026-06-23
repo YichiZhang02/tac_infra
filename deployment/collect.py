@@ -34,7 +34,7 @@
 
 import sys
 
-from deployment._record_engine import RecordConfig, run_record  # noqa: E402 (引擎含 X11/注册初始化)
+from deployment._record_engine import RecordConfig, StickyHint, run_record  # noqa: E402
 from vtla.engine.configs import parser
 
 
@@ -50,7 +50,10 @@ def collect(cfg: RecordConfig):
     # 默认存到 playground/data/<repo_id 末段> (时间戳命名由调用方/bash 负责)
     if cfg.dataset.root is None:
         cfg.dataset.root = f"playground/data/{cfg.dataset.repo_id.split('/')[-1]}"
-    return run_record(cfg)
+
+    hint = " \033[30;42m 采集中 ↑开始 | →保存 | ←重录 | ESC退出 \033[0m"
+    with StickyHint(hint):
+        return run_record(cfg)
 
 
 def main():

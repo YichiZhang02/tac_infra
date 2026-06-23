@@ -142,6 +142,7 @@ def init_keyboard_listener():
     events["exit_early"] = False
     events["rerecord_episode"] = False
     events["stop_recording"] = False
+    events["start_episode"] = False
 
     if is_headless():
         logging.warning(
@@ -155,11 +156,14 @@ def init_keyboard_listener():
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
+            if key == keyboard.Key.up:
+                print("Up arrow key pressed. Starting episode...")
+                events["start_episode"] = True
+            elif key == keyboard.Key.right:
+                print("Right arrow key pressed. Saving episode...")
                 events["exit_early"] = True
             elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+                print("Left arrow key pressed. Rerecording episode...")
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
             elif key == keyboard.Key.esc:

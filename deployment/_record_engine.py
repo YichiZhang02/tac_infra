@@ -54,6 +54,7 @@ _init_x11_threads()
 import logging
 import platform
 import shutil
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -97,6 +98,38 @@ from vtla.engine.utils.utils import init_logging, log_say
 from vtla.engine.utils.visualization_utils import init_rerun, log_rerun_data
 
 
+class StickyHint:
+    """把一行提示钉在终端最底行: 后台线程每 0.5s 重绘, 被其他输出刷掉也会马上回来。
+
+    用 ANSI: 保存光标 -> 跳到底行 -> 清行 -> 写提示 -> 恢复光标。非 tty 则空操作。
+    """
+
+    def __init__(self, text: str):
+        self.text = text
+        self._stop = threading.Event()
+        self._t: threading.Thread | None = None
+
+    def _loop(self):
+        while not self._stop.is_set():
+            sys.stdout.write(f"\0337\033[999;1H\033[K{self.text}\0338")
+            sys.stdout.flush()
+            self._stop.wait(0.5)
+
+    def __enter__(self):
+        if sys.stdout.isatty():
+            self._t = threading.Thread(target=self._loop, daemon=True, name="StickyHint")
+            self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._t is not None:
+            self._t.join(timeout=1.0)
+        if sys.stdout.isatty():
+            sys.stdout.write("\033[999;1H\033[K")
+            sys.stdout.flush()
+
+
 def busy_wait(seconds: float) -> None:
     """精确控频等待。Mac/Windows 上 time.sleep 不够精准，用忙等。"""
     if platform.system() in ("Darwin", "Windows"):
@@ -106,6 +139,64 @@ def busy_wait(seconds: float) -> None:
     else:
         if seconds > 0:
             time.sleep(seconds)
+
+
+def capture_home_action(robot: Robot) -> dict[str, float]:
+    """构建复位目标字典 (关节 + 夹爪)。
+
+    优先从 robot._home_joints (connect() 时由 config 或启动位置确定) + config.home_gripper
+    构建，保证每次复位都回到同一个固定位置。
+    robot._home_joints 不可用时回退到读当前观测。
+    """
+    home: dict[str, float] = {}
+
+    home_joints: dict[str, list[float]] = getattr(robot, "_home_joints", {})
+    joint_names: list[str] = getattr(robot, "JOINT_NAMES", [])
+    gripper_name: str = getattr(robot, "GRIPPER_NAME", "gripper")
+    home_gripper: float = getattr(getattr(robot, "config", None), "home_gripper", 1.0)
+
+    if home_joints and joint_names:
+        for side, joint_values in home_joints.items():
+            if joint_values is None:
+                continue
+            for i, jname in enumerate(joint_names):
+                if i < len(joint_values):
+                    home[f"{side}_{jname}"] = float(joint_values[i])
+            home[f"{side}_{gripper_name}"] = float(home_gripper)
+        logging.info(f"[home] 复位目标来自 robot._home_joints ({len(home)} dof, gripper={home_gripper})")
+        return home
+
+    # 回退: robot 不暴露 _home_joints 时读当前观测
+    obs = robot.get_observation()
+    for key in robot.action_features:
+        if key in obs:
+            home[key] = float(obs[key])
+        else:
+            logging.warning(f"capture_home_action: 观测中缺少动作键 '{key}', 跳过")
+    logging.info(f"[home] 复位目标从当前观测捕获 ({len(home)} dof)")
+    return home
+
+
+def move_to_home_smooth(
+    robot: Robot,
+    home_action: dict[str, float],
+    fps: int,
+    duration_s: float,
+) -> None:
+    """从当前姿态在 duration_s 内线性插值平滑移动到 home, 逐帧通过 send_action 下发。"""
+    obs = robot.get_observation()
+    start = {k: float(obs[k]) for k in home_action if k in obs}
+
+    steps = max(1, int(duration_s * fps))
+    for i in range(1, steps + 1):
+        t0 = time.perf_counter()
+        alpha = i / steps
+        target = {
+            k: start.get(k, home_action[k]) * (1 - alpha) + home_action[k] * alpha
+            for k in home_action
+        }
+        robot.send_action(target)
+        busy_wait(1 / fps - (time.perf_counter() - t0))
 
 
 @dataclass
@@ -596,41 +687,52 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
-                # 推理模式标志: 有 policy、无 teleop、且机器人支持自动复位
-                auto_home = (policy is not None and teleop is None
-                             and hasattr(robot, "move_to_home"))
+                _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
+                home_action: dict[str, float] = capture_home_action(robot)
+                auto_home = bool(home_action)
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
 
-                    # ── 推理模式: episode 开始前自动复位, 等用户按→确认 ─────────
+                    # ── 每次 episode 开始前: 平滑复位, 等用户按↑确认 ──────────
                     if auto_home:
                         log_say(
                             f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}: 机械臂复位中...",
                             cfg.play_sounds,
                         )
-                        robot.move_to_home()
-                        log_say("复位完成 按→开始", cfg.play_sounds)
-                        # 清除复位期间可能残留的按键事件, 等待用户主动按→
+                        move_to_home_smooth(robot, home_action, cfg.dataset.fps, _home_duration)
+                        log_say("复位完成 按↑开始", cfg.play_sounds)
+                        # 清除复位期间可能残留的按键事件, 等待用户主动按↑
+                        events["start_episode"] = False
                         events["exit_early"] = False
                         events["rerecord_episode"] = False
-                        while not events["exit_early"] and not events["stop_recording"]:
+                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
                             time.sleep(0.05)
                         if events["stop_recording"]:
                             break
-                        # ← 在等待阶段被按下 → 重新复位 (不开始录制)
+                        # ← 在等待阶段被按下 → 重新复位
                         if events["rerecord_episode"]:
                             events["rerecord_episode"] = False
-                            events["exit_early"] = False
+                            events["start_episode"] = False
                             continue
-                        events["exit_early"] = False  # 消费"开始"触发
-                        logging.info(
-                            f"[auto_home] 开始推理 episode {dataset.num_episodes + 1}"
-                        )
-                    # ── 遥操模式: 仅打印提示 ────────────────────────────────────
+                        events["start_episode"] = False  # 消费"开始"触发
                     else:
                         log_say(
-                            f"正在记录中,..., 按<-方向键复位重新开始, 按->方向键保存 , episode {dataset.num_episodes}",
+                            f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}: 按↑开始 | →保存 | ←重录 | ESC退出",
                             cfg.play_sounds,
                         )
+                        events["start_episode"] = False
+                        events["exit_early"] = False
+                        events["rerecord_episode"] = False
+                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
+                            time.sleep(0.05)
+                        if events["stop_recording"]:
+                            break
+                        if events["rerecord_episode"]:
+                            events["rerecord_episode"] = False
+                            events["start_episode"] = False
+                            continue
+                        events["start_episode"] = False
+
+                    logging.info(f"开始录制 episode {dataset.num_episodes + 1}")
 
                     # ── 主录制循环 ────────────────────────────────────────────
                     record_loop(
@@ -651,32 +753,14 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         display_data=cfg.display_data,
                     )
 
-                    # ── 遥操模式: 等待人工还原场景 (推理模式跳过, 下次循环自动复位) ─
-                    if not auto_home and not events["stop_recording"] and (
-                        (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                    ):
-                        log_say("复位中, 进行桌面场景还原.,Reset the environment", cfg.play_sounds)
-                        record_loop(
-                            robot=robot,
-                            events=events,
-                            fps=cfg.dataset.fps,
-                            teleop_action_processor=teleop_action_processor,
-                            robot_action_processor=robot_action_processor,
-                            robot_observation_processor=robot_observation_processor,
-                            teleop=teleop,
-                            record_features=record_features,
-                            control_time_s=cfg.dataset.reset_time_s,
-                            single_task=cfg.dataset.single_task,
-                            display_data=cfg.display_data,
-                        )
-
-                    # ── 重录判断 ─────────────────────────────────────────────
+                    # ── 重录: 丢弃本次 episode, 回到复位等待 ─────────────────
                     if events["rerecord_episode"]:
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
                         dataset.clear_episode_buffer()
                         continue
 
+                    # ── 保存 ─────────────────────────────────────────────────
                     dataset.save_episode()
                     recorded_episodes += 1
         else:
@@ -696,32 +780,50 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
                 recorded_episodes = 0
                 episode_index = episode_start
-                auto_home_stream = (policy is not None and teleop is None
-                                    and hasattr(robot, "move_to_home"))
+                _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
+                home_action_stream: dict[str, float] = capture_home_action(robot)
+                auto_home_stream = bool(home_action_stream)
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
 
-                    # ── 推理模式: 开始前自动复位, 等用户按→确认 ───────────────
+                    # ── 每次 episode 开始前: 平滑复位, 等用户按↑确认 ──────────
                     if auto_home_stream:
                         log_say(
                             f"Stream episode {episode_index + 1}: 机械臂复位中...",
                             cfg.play_sounds,
                         )
-                        robot.move_to_home()
-                        log_say("复位完成 按→开始", cfg.play_sounds)
+                        move_to_home_smooth(robot, home_action_stream, cfg.dataset.fps, _home_duration_s)
+                        log_say("复位完成 按↑开始", cfg.play_sounds)
+                        events["start_episode"] = False
                         events["exit_early"] = False
                         events["rerecord_episode"] = False
-                        while not events["exit_early"] and not events["stop_recording"]:
+                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
                             time.sleep(0.05)
                         if events["stop_recording"]:
                             break
                         if events["rerecord_episode"]:
                             events["rerecord_episode"] = False
-                            events["exit_early"] = False
+                            events["start_episode"] = False
                             continue
-                        events["exit_early"] = False
+                        events["start_episode"] = False
                     else:
-                        log_say(f"Recording stream episode {episode_index}", cfg.play_sounds)
+                        log_say(
+                            f"Stream episode {episode_index + 1}: 按↑开始 | →保存 | ←重录 | ESC退出",
+                            cfg.play_sounds,
+                        )
+                        events["start_episode"] = False
+                        events["exit_early"] = False
+                        events["rerecord_episode"] = False
+                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
+                            time.sleep(0.05)
+                        if events["stop_recording"]:
+                            break
+                        if events["rerecord_episode"]:
+                            events["rerecord_episode"] = False
+                            events["start_episode"] = False
+                            continue
+                        events["start_episode"] = False
 
+                    logging.info(f"开始录制 stream episode {episode_index + 1}")
                     stream_writer.start_episode(episode_index)
                     record_loop(
                         robot=robot,
@@ -742,30 +844,14 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         display_data=cfg.display_data,
                     )
 
-                    if not auto_home_stream and not events["stop_recording"] and (
-                        (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                    ):
-                        log_say("Reset the environment", cfg.play_sounds)
-                        record_loop(
-                            robot=robot,
-                            events=events,
-                            fps=cfg.dataset.fps,
-                            teleop_action_processor=teleop_action_processor,
-                            robot_action_processor=robot_action_processor,
-                            robot_observation_processor=robot_observation_processor,
-                            teleop=teleop,
-                            record_features=record_features,
-                            control_time_s=cfg.dataset.reset_time_s,
-                            single_task=cfg.dataset.single_task,
-                            display_data=cfg.display_data,
-                        )
-
+                    # ── 重录: 丢弃本次视频, 回到复位等待 ─────────────────────
                     if events["rerecord_episode"]:
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
                         stream_writer.close_episode(discard=True)
                         continue
 
+                    # ── 保存 ─────────────────────────────────────────────────
                     stream_writer.close_episode(discard=False)
                     recorded_episodes += 1
                     episode_index += 1

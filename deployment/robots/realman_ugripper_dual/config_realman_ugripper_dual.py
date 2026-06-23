@@ -84,7 +84,7 @@ class RealmanUGripperDualConfig(RobotConfig):
     fisheye_max_datagram: int = 1200
 
     # ============ 触觉传感器 (dmrobotics Flux gRPC) ============
-    pc_host: str = "192.168.1.120"          # 本机 IP, 用于 UDP 回传
+    pc_host: str = "192.168.1.102"          # 本机 IP, 用于 UDP 回传
     tactile0_grpc_port: int = 50051
     tactile1_grpc_port: int = 50052
     tactile0_dev_id: int = 0

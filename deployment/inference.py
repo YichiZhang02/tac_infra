@@ -40,43 +40,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from deployment._record_engine import RecordConfig, run_record  # noqa: E402 (引擎含 X11/注册初始化)
+from deployment._record_engine import RecordConfig, StickyHint, run_record  # noqa: E402
 from vtla.engine.configs import parser
 
 logger = logging.getLogger(__name__)
-
-
-class StickyHint:
-    """把一行提示钉在终端最底行: 后台线程每 0.5s 重绘, 被其他输出刷掉也会马上回来。
-
-    用 ANSI: 保存光标 -> 跳到底行 -> 清行 -> 写提示 -> 恢复光标。非 tty 则空操作。
-    """
-
-    def __init__(self, text: str):
-        self.text = text
-        self._stop = threading.Event()
-        self._t: threading.Thread | None = None
-
-    def _loop(self):
-        while not self._stop.is_set():
-            # \0337 存光标; \033[999;1H 到底行; \033[K 清行; 写提示; \0338 恢复光标
-            sys.stdout.write(f"\0337\033[999;1H\033[K{self.text}\0338")
-            sys.stdout.flush()
-            self._stop.wait(0.5)
-
-    def __enter__(self):
-        if sys.stdout.isatty():
-            self._t = threading.Thread(target=self._loop, daemon=True, name="StickyHint")
-            self._t.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        if self._t is not None:
-            self._t.join(timeout=1.0)
-        if sys.stdout.isatty():
-            sys.stdout.write("\033[999;1H\033[K")  # 退出时清掉提示行
-            sys.stdout.flush()
 
 
 @dataclass
@@ -179,7 +146,7 @@ def inference(cfg: InferenceConfig):
         cfg.dataset.root = f"playground/eval/{cfg.dataset.repo_id.split('/')[-1]}"
 
     # 钉在底行的保存提示 (推理时容易被日志刷掉)
-    hint = " \033[30;43m 推理中 按 → 保存 | ← 重录 | ESC 退出 \033[0m"
+    hint = " \033[30;43m 推理中 ↑开始 | →保存 | ←重录 | ESC退出 \033[0m"
     with StickyHint(hint):
         return run_record(cfg)
 

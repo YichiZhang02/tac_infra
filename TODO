@@ -11,4 +11,4 @@ test_ee_deploy_roundtrip.py。
   3. record-engine：episode 开始重置 A0；observation_features/action_features 按 mode 切换。
   数学已离线证明（test_ee_deploy_roundtrip.py：pose 闭环 1e-16、FK(IK(pose))==pose）。
 
-重新验证整个infra 并加上更多文档
+rewrite collect.sh

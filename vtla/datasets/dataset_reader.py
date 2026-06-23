@@ -51,6 +51,7 @@ class DatasetReader:
         delta_timestamps: dict[str, list[float]] | None,
         image_transforms: Callable | None,
         return_uint8: bool = False,
+        use_video_keys: list[str] | None = None,
     ):
         """Initialize the reader with metadata, filtering, and transform config.
 
@@ -76,6 +77,9 @@ class DatasetReader:
         self._video_backend = video_backend
         self._image_transforms = image_transforms
         self._return_uint8 = return_uint8
+        # Only decode these video streams (subset of meta.video_keys). None = decode all. Lets the
+        # training path skip cameras the policy doesn't consume (a big data-loading speedup).
+        self._use_video_keys = set(use_video_keys) if use_video_keys is not None else None
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
@@ -194,13 +198,20 @@ class DatasetReader:
         }
         return query_indices, padding
 
+    @property
+    def _decode_video_keys(self) -> list[str]:
+        """Video keys to actually decode (meta.video_keys filtered by the optional use_video_keys)."""
+        if self._use_video_keys is None:
+            return self._meta.video_keys
+        return [k for k in self._meta.video_keys if k in self._use_video_keys]
+
     def _get_query_timestamps(
         self,
         current_ts: float,
         query_indices: dict[str, list[int]] | None = None,
     ) -> dict[str, list[float]]:
         query_timestamps = {}
-        for key in self._meta.video_keys:
+        for key in self._decode_video_keys:
             if query_indices is not None and key in query_indices:
                 if self._absolute_to_relative_idx is not None:
                     relative_indices = [self._absolute_to_relative_idx[idx] for idx in query_indices[key]]
@@ -248,7 +259,12 @@ class DatasetReader:
                 self._video_backend,
                 return_uint8=self._return_uint8,
             )
-            return vid_key, frames.squeeze(0)
+            # Keep the leading time dim for delta-windowed keys so they stay consistent with the
+            # non-video keys (which keep (T, ...) via torch.stack). Only squeeze the plain single-frame
+            # convention (no delta window for this key); otherwise n_obs_steps=1 would silently drop the
+            # temporal dim -> (C, H, W) instead of (1, C, H, W).
+            is_windowed = self.delta_indices is not None and vid_key in self.delta_indices
+            return vid_key, (frames if is_windowed else frames.squeeze(0))
 
         items = list(query_timestamps.items())
 
@@ -289,7 +305,8 @@ class DatasetReader:
         if self._image_transforms is not None:
             image_keys = self._meta.camera_keys
             for cam in image_keys:
-                item[cam] = self._image_transforms(item[cam])
+                if cam in item:  # may be absent when use_video_keys skips this camera
+                    item[cam] = self._image_transforms(item[cam])
 
         # Add task as a string
         task_idx = item["task_index"].item()

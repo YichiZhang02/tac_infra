@@ -142,6 +142,15 @@ class SensorRoutingMixin:
         """Tactile keys reserved for a dedicated encoder branch (``encode`` mode)."""
         return self._dedupe(list(self.tactile_keys)) if self.tactile_mode == "encode" else []
 
+    def decoded_video_keys(self) -> list[str]:
+        """All camera videos this policy actually consumes (RGB + tactile-as-image + tactile-encode).
+
+        Used to tell the dataset which video streams to decode, so unselected cameras (e.g. finger
+        cams when ``tactile_mode='none'``) are not decoded every sample — a large data-loading win
+        for fast models that would otherwise starve the GPU. Cameras not in this list are skipped.
+        """
+        return self._dedupe(self.image_keys() + self.tactile_encoder_keys())
+
     @property
     def image_features(self) -> dict:
         """RGB image features fed to the policy's vision backbone.

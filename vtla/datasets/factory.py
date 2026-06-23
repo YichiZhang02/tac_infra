@@ -83,6 +83,13 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset:
             cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.trainable_config, ds_meta)
+        # Decode only the cameras the policy actually consumes (skips e.g. finger cams when
+        # tactile_mode='none'); avoids wasting data-loader time on unused video streams.
+        use_video_keys = None
+        if hasattr(cfg.trainable_config, "decoded_video_keys"):
+            keys = cfg.trainable_config.decoded_video_keys()
+            if keys:
+                use_video_keys = keys
         if not cfg.dataset.streaming:
             dataset = LeRobotDataset(
                 cfg.dataset.repo_id,
@@ -94,6 +101,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset:
                 video_backend=cfg.dataset.video_backend,
                 return_uint8=True,
                 tolerance_s=cfg.tolerance_s,
+                use_video_keys=use_video_keys,
             )
         else:
             from .streaming_dataset import StreamingLeRobotDataset

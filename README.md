@@ -11,9 +11,8 @@ playground/
 ├── pretrained_models/   # 预训练权重 (CLIP / AnyTouch / pi05_base / 底座 VLM)
 ├── data/                # 训练 / 预训练数据集 (LeRobot 格式或裸 frame_cache)
 ├── results/
-│   ├── backbones/       # train_enc.sh 输出 (触觉 MAE)
-│   └── models/          # train.sh 输出 (VTLA 策略 checkpoint)
-├── logs/                # 训练日志 (backbones/ 与 models/ 分目录)
+│   ├── backbones/       # train_enc.sh 输出 (触觉 MAE checkpoint + 日志)
+│   └── models/          # train.sh 输出 (VTLA 策略 checkpoint + 日志)
 └── eval/                # 推理录制的评测数据集
 ```
 
@@ -87,7 +86,7 @@ git reset --hard origin/main
 
 ## Backbone 预训练: 触觉 MAE (`train_enc.sh`)
 
-基于 `vtla/tac_encoder/tactile_mae`, 直接吃 `playground/data/` 下的数据训练 AnyTouch stage1 风格的触觉 MAE encoder, 输出到 `playground/results/backbones/`。
+基于 `vtla/tac_encoder/tactile_mae`, 直接吃 `playground/data/` 下的数据训练 AnyTouch stage1 风格的触觉 MAE encoder, checkpoint 与日志一起输出到 `playground/results/backbones/<run>/`。
 
 ```bash
 # 用法: bash train_enc.sh <dataset_ids> <init_mode> <arch> <num_processes> <batch_size> <epochs>
@@ -108,10 +107,12 @@ bash train_enc.sh rm_umi_dual_pen_open clip vit_l
 常用环境变量: `GPU_ID`(默认 `0,1,2,3`)、`TACTILE_KEYS`(触觉图 key 列表 `[k1,k2,...]`)、`SENSOR_ID`、`MASK_RATIO`、`CONTACT_FILTER`(接触帧筛选, 默认开)、`IMAGE_SIZE`、`RAW_FRAME_CACHE`(强制裸缓存模式)。
 
 > 数据模式自动识别: 含 `meta/info.json` 的为 LeRobot(先 warm-up 缓存再训练); 否则为裸 frame_cache(跳过 warm-up、关闭 contact_filter, 须用与构建缓存时一致的 `IMAGE_SIZE`)。
+>
+> 日志: 训练期间先写到系统临时目录, 正常跑完才搬进 `playground/results/backbones/<run>/` 与 checkpoint 同目录; 训练中途失败/中断则丢弃临时日志(不落盘)。
 
 ## VTLA 策略训练 (`train.sh`)
 
-训练 act / diffusion / pi05 / starvla_groot 策略, 输出到 `playground/results/models/`, 日志到 `playground/logs/models/`。
+训练 act / diffusion / pi05 / starvla_groot 策略, checkpoint 与日志一起输出到 `playground/results/models/<run>/`(日志训练期间先写临时目录, 正常跑完才搬进与 checkpoint 同目录; 中途失败/中断则丢弃, 不落盘)。
 
 ```bash
 # 用法: bash train.sh <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
@@ -170,6 +171,25 @@ bash train.sh rm_umi_dual_pen_open pi05 1 32 10000 false none episode_ee relativ
 ```
 
 > 推理 (EE 模式) 的硬件下发链路 (FK 读 state + IK/`rm_movep_canfd` 发 action + 首帧绝对位姿缓存) 仍在接入中, 见 `TODO`。训练侧已全部可用。
+
+---
+
+# Tools
+
+仓库根的 `tools/` 放训练/数据相关的离线小工具。
+
+## 降分辨率数据集 (`tools/downscale_dataset_videos.py`)
+
+训练时相机帧在 CPU 上逐步解码, 而 RGB 相机原生分辨率很大(如 1920×1080), policy 又会把每帧 resize 到 ~224。解码全分辨率帧再丢掉像素会让 data loader 成为瓶颈(快模型会被 GPU 拖到周期性 stall)。该脚本**非破坏地**生成一份降分辨率副本: 只重编码大的 8-bit RGB 相机视频到 `SIZE×SIZE`(默认 256, 给 224 裁剪留余量), 帧数/fps/时间戳不变、用小 GOP 保证随机 seek 便宜; **触觉 finger 相机(16-bit 无损 .mkv)原样拷贝不动**, 同时 patch `meta/info.json` 里对应 feature 的 shape/分辨率/codec。
+
+```bash
+python tools/downscale_dataset_videos.py \
+    --src playground/data/rm_umi_dual_pen_open \
+    --dst playground/data/rm_umi_dual_pen_open_256 \
+    --size 256
+```
+
+之后训练用 `--dataset.root=<dst>`(repo_id 不变)。降分辨率目标自动选取(全局 .mp4 路径、8-bit、非无损、短边 > size), 可用 `--cameras` 强制指定; 常用参数 `--crf`(质量)、`--gop`(seek 速度)、`--jobs`(并行)、`--verify`(ffprobe 校验帧数一致)。需要 `ffmpeg`/`ffprobe` 在 PATH 上。
 
 ---
 

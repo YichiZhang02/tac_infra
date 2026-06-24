@@ -1,0 +1,43 @@
+{
+  "host": "x5-right",
+  "device": "/dev/video4",
+  "camera_model_enum": 1,
+  "camera_model": "pinhole",
+  "distortion_model": "equidistant",
+  "intrinsics": [
+    638.8104248046875,
+    643.6183471679688,
+    962.7141723632812,
+    556.96875
+  ],
+  "camera_matrix": [
+    [
+      638.8104248046875,
+      0.0,
+      962.7141723632812
+    ],
+    [
+      0.0,
+      643.6183471679688,
+      556.96875
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coeffs": [
+    -0.010230988264083862,
+    -0.009957391768693924,
+    0.0008883849950507283,
+    0.000022471387637779117
+  ],
+  "resolution": [
+    1920.0,
+    1080.0
+  ],
+  "sn": "FE20260508020060",
+  "sn_valid": true,
+  "source": "/app/fish_camera/camera_calibration.py:get_intrinsics('/dev/video4')"
+}

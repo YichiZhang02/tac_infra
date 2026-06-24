@@ -50,7 +50,7 @@ def remap_ee_dataset_stats(dataset_stats, config):
         if ACTION_RELATIVE_EE not in dataset_stats:
             raise KeyError(
                 f"action_mode='relative_ee' needs '{ACTION_RELATIVE_EE}' stats. Re-run "
-                "vtla/datasets/convert_joints_to_eepose.py to (re)generate them."
+                "tools/convert_joints_to_eepose.py to (re)generate them."
             )
         dataset_stats[ACTION] = dataset_stats[ACTION_RELATIVE_EE]
     return dataset_stats

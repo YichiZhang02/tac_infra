@@ -54,7 +54,7 @@ from ..robot import Robot
 from ..utils import ensure_safe_goal_position
 from .config_realman_ugripper_dual import RealmanUGripperDualConfig
 from deployment.hardware.grippers import LingkongGripper
-from deployment.hardware.wrist_cameras import FisheyeGrpcCamera
+from deployment.hardware.wrist_cameras import FisheyeGrpcCamera, WristUndistorter, default_calib_path
 from deployment.hardware.tactile_sensors import DmroboticsFlux
 from deployment.hardware.follower_arms import RealmanTcpFollower
 
@@ -75,6 +75,8 @@ class _ArmDevices:
         self.fisheye: FisheyeGrpcCamera | None = None
         self.tactile0: DmroboticsFlux | None = None
         self.tactile1: DmroboticsFlux | None = None
+        # 腕部去畸变器 (None = 不去畸变, 输出原生鱼眼)
+        self.wrist_undistorter: WristUndistorter | None = None
 
     @property
     def receivers(self) -> list:
@@ -102,6 +104,10 @@ class RealmanUGripperDual(Robot):
 
         self._arms: dict[str, _ArmDevices] = {side: _ArmDevices(side) for side in config.arms}
 
+        # 腕部去畸变开关: "true" 开, "false"/"auto" 关 (auto 仅在 inference.py 改写为 true/false 时生效;
+        # 采集/遥操作无 policy, auto 即关闭, 存原生鱼眼供离线 tools 去畸变)。
+        self._undistort_on = str(config.undistort_wrist).lower() == "true"
+
         # 额外本地相机 (默认无)
         self.cameras = make_top_cameras_from_configs(config.cameras)
 
@@ -119,6 +125,11 @@ class RealmanUGripperDual(Robot):
 
     def _fisheye_udp_port(self, side: str) -> int:
         return self.config.left_fisheye_udp_port if side == "left" else self.config.right_fisheye_udp_port
+
+    def _wrist_calib_path(self, side: str) -> str:
+        """该臂腕部去畸变标定文件: config.wrist_calib[side] 优先, 否则用 deployment 内置。"""
+        wc = self.config.wrist_calib or {}
+        return str(wc.get(side) or default_calib_path(side))
 
     def _tactile_pc_ports(self, side: str) -> tuple[int, int]:
         if side == "left":
@@ -140,7 +151,11 @@ class RealmanUGripperDual(Robot):
     def _stream_ft(self) -> dict[str, tuple]:
         ft: dict[str, tuple] = {}
         for side in self.config.arms:
-            ft[f"{side}_cam_wrist"] = (self.config.fisheye_height, self.config.fisheye_width, 3)
+            if self._undistort_on:
+                crop = self.config.undistort_crop
+                ft[f"{side}_cam_wrist"] = (crop, crop, 3)
+            else:
+                ft[f"{side}_cam_wrist"] = (self.config.fisheye_height, self.config.fisheye_width, 3)
             if self.config.use_tactile:
                 ft[f"{side}_cam_finger0"] = (self.config.tactile_height, self.config.tactile_width, 3)
                 ft[f"{side}_cam_finger1"] = (self.config.tactile_height, self.config.tactile_width, 3)
@@ -301,6 +316,11 @@ class RealmanUGripperDual(Robot):
             first_frame_timeout=cfg.stream_first_frame_timeout,
             name=f"{side}_cam_wrist",
         )
+        # 腕部去畸变器 (开启时按训练流程: 鱼眼去畸变 + 居中裁 crop)。maps 只算一次。
+        if self._undistort_on:
+            arm.wrist_undistorter = WristUndistorter(
+                self._wrist_calib_path(side), crop=cfg.undistort_crop
+            )
         if cfg.use_tactile:
             arm.tactile0 = DmroboticsFlux(
                 dev_id=cfg.tactile0_dev_id,
@@ -492,7 +512,10 @@ class RealmanUGripperDual(Robot):
         # 2. 数据流图像
         for side in self.config.arms:
             arm = self._arms[side]
-            obs[f"{side}_cam_wrist"] = arm.fisheye.async_read()
+            wrist = arm.fisheye.async_read()
+            if arm.wrist_undistorter is not None:
+                wrist = arm.wrist_undistorter(wrist)  # 鱼眼去畸变 + 居中裁 (与训练一致)
+            obs[f"{side}_cam_wrist"] = wrist
             if self.config.use_tactile:
                 obs[f"{side}_cam_finger0"] = arm.tactile0.async_read()
                 obs[f"{side}_cam_finger1"] = arm.tactile1.async_read()

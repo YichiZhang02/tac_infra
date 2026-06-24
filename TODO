@@ -12,3 +12,4 @@ test_ee_deploy_roundtrip.py。
   数学已离线证明（test_ee_deploy_roundtrip.py：pose 闭环 1e-16、FK(IK(pose))==pose）。
 
 rewrite collect.sh
+manner to save traing log

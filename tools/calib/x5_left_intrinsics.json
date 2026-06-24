@@ -1,0 +1,43 @@
+{
+  "host": "x5-left",
+  "device": null,
+  "camera_model_enum": 1,
+  "camera_model": "pinhole",
+  "distortion_model": "equidistant",
+  "intrinsics": [
+    640.4641941658512,
+    645.5163089107322,
+    955.4534393084685,
+    524.4782806158214
+  ],
+  "camera_matrix": [
+    [
+      640.4641941658512,
+      0.0,
+      955.4534393084685
+    ],
+    [
+      0.0,
+      645.5163089107322,
+      524.4782806158214
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coeffs": [
+    -0.027355074862157283,
+    -0.001462037477594429,
+    -0.002450296917066493,
+    0.0006002939399206398
+  ],
+  "resolution": [
+    1920.0,
+    1080.0
+  ],
+  "sn": null,
+  "sn_valid": false,
+  "source": "ugripper/zxd_fisheye/V2004相机标定结果/rgb_video_ros-camchain.yaml (Kalibr aprilgrid calibration)"
+}

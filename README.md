@@ -160,7 +160,7 @@ bash train.sh rm_umi_dual_pen_open diffusion 4 32 20000 false as_image joint
 **前置 (一次性)**: 先把关节数据集离线转出 EE 列 (正运动学 FK, 用睿尔曼算法库, 无需连机械臂)。会给原数据集**新增** `observation.state_episode_ee` / `action_episode_ee` 两列及 `action_relative_ee` 归一化统计, 原关节列保持不变 (joint 模式照常可用):
 
 ```bash
-python -m vtla.datasets.convert_joints_to_eepose --root playground/data/rm_umi_dual_pen_open
+python tools/convert_joints_to_eepose.py --root playground/data/rm_umi_dual_pen_open
 #   --horizon 32   # action_relative_ee 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
 ```
 
@@ -190,6 +190,51 @@ python tools/downscale_dataset_videos.py \
 ```
 
 之后训练用 `--dataset.root=<dst>`(repo_id 不变)。降分辨率目标自动选取(全局 .mp4 路径、8-bit、非无损、短边 > size), 可用 `--cameras` 强制指定; 常用参数 `--crf`(质量)、`--gop`(seek 速度)、`--jobs`(并行)、`--verify`(ffprobe 校验帧数一致)。需要 `ffmpeg`/`ffprobe` 在 PATH 上。
+
+## 鱼眼去畸变数据集 (`tools/undistort_dataset_videos.py`)
+
+UMI 腕部相机录制的是全幅鱼眼(1920×1080, Kalibr equidistant/OpenCV fisheye 模型), 训练需要的是去畸变后的正方形中心裁剪(896×896, 即 `..._umistyle` → `..._umistyle_undist`)。该脚本**非破坏地**生成去畸变副本: 每帧 `解码 → cv2.fisheye 去畸变(新内参=K, 不额外缩放) → 居中裁 896×896(不再 resize) → 重编码`, 帧数/fps/时间戳不变、小 GOP 保证随机 seek 便宜; **只处理腕部相机, 触觉 finger 相机(16-bit 无损 .mkv)及其它相机原样拷贝不动**, 同时 patch `meta/info.json` 的 shape/分辨率/codec。流程与 `ugripper/zxd_fisheye/undistort_wrist.py` 逐像素一致。
+
+标定文件已内置在 `tools/calib/x5_{left,right}_intrinsics.json`(从 `ugripper/zxd_fisheye` 拷入), 默认自动加载, 一般无需指定 `--calib`。
+
+```bash
+# 快速可视化自检: 每个腕相机抽 1 帧, 输出 原图/去畸变带裁剪框/最终896 三张 PNG + 短 clip 到 tools/undistort_test/
+python tools/undistort_dataset_videos.py --src playground/data/rm_umi_dual_pen_open --test
+
+# 全量处理
+python tools/undistort_dataset_videos.py \
+    --src playground/data/rm_umi_dual_pen_open \
+    --dst playground/data/rm_umi_dual_pen_open_undist
+```
+
+标定 JSON 格式 (Kalibr equidistant):
+
+```json
+{
+    "distortion_model": "equidistant",
+    "camera_matrix":     [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+    "distortion_coeffs": [k1, k2, k3, k4],
+    "resolution":        [width, height]
+}
+```
+
+默认去畸变 `observation.images.{left,right}_cam_wrist`(可用 `--cameras` 覆盖)。`--calib` 不填用内置标定; 也可给单个 json 或 `--calib left_cam_wrist=l.json right_cam_wrist=r.json`。常用参数 `--crop`(裁剪边长, 默认 896)、`--crf`、`--gop`、`--jobs`、`--verify`(ffprobe 校验帧数一致)。`meta/stats.json` 的逐通道图像统计**保持不变**(去畸变+裁剪是几何 warp, 基本保持均值/方差, 与 downscale 同理)。需要 `ffmpeg`/`ffprobe` 及 `opencv-python`。
+
+> **顺序很重要: 先去畸变(原生分辨率)再降采样, 不要反过来。** 在原生 1920×1080 上去畸变并裁 896, 再降到训练分辨率, 才能保留细节和正确的中心裁剪 FOV; 直接对已降采样的 256 数据集去畸变会糊且 FOV 不对(挤压后的全鱼眼视野, 而非 896 中心裁剪)。
+>
+> ```bash
+> # 1) 原始数据集 → 896 去畸变
+> python tools/undistort_dataset_videos.py \
+>     --src playground/data/rm_umi_dual_260617_pen_place_cap_notop \
+>     --dst playground/data/rm_umi_dual_260617_pen_place_cap_notop_undist
+>
+> # 2) 896 去畸变 → 256 (复用降分辨率工具)
+> python tools/downscale_dataset_videos.py \
+>     --src playground/data/rm_umi_dual_260617_pen_place_cap_notop_undist \
+>     --dst playground/data/rm_umi_dual_260617_pen_place_cap_notop_undist_256 --size 256
+> ```
+>
+> A100 等数据中心卡**无 NVENC 硬编**, 用默认 `libx264`(CPU); 仅消费级/带 NVENC 的卡才用 `--codec hevc_nvenc`。
 
 ---
 
@@ -300,3 +345,22 @@ python -m deployment.inference \
 ```
 
 > 推理录制的评测数据集默认落到 `playground/eval/<repo_id 末段>`。
+
+### 腕部鱼眼去畸变 (训练-推理一致)
+
+若模型是在去畸变数据集上训练的(腕部=鱼眼去畸变+居中裁 896), 推理时必须对原生鱼眼帧做**相同**变换, 否则几何不一致(训练-推理 gap)。`--match_policy` 会**自动判定并开启**, 无需手动:
+
+1. **marker 优先**: 经 checkpoint 的 `train_config.json` 找到训练集, 若其 `meta/info.json` 有 `undistort` 标记(由 `tools/undistort_dataset_videos.py` 写入) → 开启, 并采用其中的 `crop`;
+2. **名称兜底**: 训练集不可访问时, 看 `repo_id`/`root` 是否含 `undist`;
+3. 都不满足 → 关闭。
+
+去畸变在 `get_observation` 内对腕部帧即时完成(`deployment/hardware/wrist_cameras/undistort.py`, 与 tools 逐像素一致, 标定内置在 `.../calib/x5_{left,right}_intrinsics.json`), 输出 896×896, 最终 224 由 policy 的 `resize_imgs_to` 完成; 录下的评测视频也是去畸变 896, 与 policy 输入一致。
+
+手动覆盖(`match_policy=false` 或想强制):
+
+```bash
+--robot.undistort_wrist=true     # 强制开 (false 强制关; 默认 auto)
+--robot.undistort_crop=896       # 裁剪边长 (须与训练 crop 一致)
+```
+
+> 采集(`collect`)/遥操作无 policy, `auto` 即**关闭**, 存原生鱼眼, 之后用 `tools/undistort_dataset_videos.py` 离线去畸变 —— 切勿在采集端就去畸变(会丢失原始数据)。

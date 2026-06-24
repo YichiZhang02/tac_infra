@@ -89,6 +89,64 @@ def _task_from_checkpoint(pretrained_path: str) -> str | None:
         return None
 
 
+def _train_dataset_dirs(pretrained_path: str) -> tuple[list[Path], str]:
+    """从 checkpoint 的 train_config.json 找训练集候选目录 + repo_id/root 文字 (用于名称兜底)。"""
+    candidates: list[Path] = []
+    name_hint = ""
+    try:
+        tc = Path(pretrained_path) / "train_config.json"
+        if tc.is_file():
+            ds = (json.load(open(tc)).get("dataset") or {})
+            root, repo_id = ds.get("root"), ds.get("repo_id")
+            name_hint = f"{root or ''} {repo_id or ''}"
+            if root:
+                candidates.append(Path(root))
+            if repo_id:
+                candidates.append(Path("playground/data") / repo_id)
+    except Exception as e:
+        logger.warning(f"[match-policy] 解析 train_config 失败: {e}")
+    return candidates, name_hint
+
+
+def _resolve_undistort(cfg: InferenceConfig) -> None:
+    """把 robot.undistort_wrist=="auto" 按 checkpoint 解析为 true/false (分层: marker 优先, 名称兜底)。
+
+    1) 训练集 meta/info.json 有 "undistort" 标记 -> 开启, 并采用其中的 crop;
+    2) 训练集可访问但无标记 -> 关闭 (可靠判定: 该数据集未去畸变);
+    3) 训练集不可访问 -> 看 train_config 的 repo_id/root 是否含 "undist";
+    4) 显式 true/false 始终覆盖 auto。
+    """
+    if not hasattr(cfg.robot, "undistort_wrist"):
+        return  # 该机器人不支持腕部去畸变, 跳过
+    val = str(cfg.robot.undistort_wrist).lower()
+    if val in ("true", "false"):
+        logger.info(f"[match-policy] 腕部去畸变(显式): {val}")
+        cfg.robot.undistort_wrist = val
+        return
+
+    candidates, name_hint = _train_dataset_dirs(cfg.policy.pretrained_path)
+    info_path = next((c / "meta" / "info.json"
+                      for c in candidates if (c / "meta" / "info.json").is_file()), None)
+    enabled, crop, why = False, None, "默认关闭"
+    if info_path is not None:
+        try:
+            marker = (json.load(open(info_path)).get("undistort") or None)
+        except Exception:
+            marker = None
+        if marker:
+            enabled, crop, why = True, marker.get("crop"), f"训练集标记 {info_path}"
+        else:
+            enabled, why = False, f"训练集无标记 {info_path}"
+    elif "undist" in name_hint.lower():
+        enabled, why = True, f"名称兜底('undist' in {name_hint.strip()!r})"
+
+    cfg.robot.undistort_wrist = "true" if enabled else "false"
+    if enabled and crop:
+        cfg.robot.undistort_crop = int(crop)
+    logger.info(f"[match-policy] 腕部去畸变(auto)={cfg.robot.undistort_wrist} "
+                f"(crop={cfg.robot.undistort_crop}) <- {why}")
+
+
 def _apply_match_policy(cfg: InferenceConfig) -> None:
     """按 checkpoint 把机器人硬件 + single_task 对齐到模型实际所需。"""
     in_feats = set(cfg.policy.input_features or {})
@@ -120,8 +178,12 @@ def _apply_match_policy(cfg: InferenceConfig) -> None:
                 cfg.dataset.single_task = task
                 logger.info(f"[match-policy] single_task <- 训练集 tasks.parquet: {task!r}")
 
+    # 腕部去畸变: 按 checkpoint 自动判定 (消除训练-推理 gap)
+    _resolve_undistort(cfg)
+
     logger.info(f"[match-policy] 对齐结果: use_tactile={cfg.robot.use_tactile}, "
-                f"cameras={list(getattr(cfg.robot, 'cameras', {}) or {})}")
+                f"cameras={list(getattr(cfg.robot, 'cameras', {}) or {})}, "
+                f"undistort_wrist={getattr(cfg.robot, 'undistort_wrist', 'n/a')}")
 
 
 @parser.wrap()

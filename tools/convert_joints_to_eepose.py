@@ -38,8 +38,8 @@ Updates ``meta/info.json`` (features), ``meta/stats.json`` (global), and ``meta/
 (per-episode stats) so the dataset loads with the new features.
 
 Usage:
-    python -m vtla.datasets.convert_joints_to_eepose --root playground/data/<dataset>
-    python -m vtla.datasets.convert_joints_to_eepose --src <src> --dst <dst>   # copy first
+    python tools/convert_joints_to_eepose.py --root playground/data/<dataset>
+    python tools/convert_joints_to_eepose.py --src <src> --dst <dst>   # copy first
 """
 
 from __future__ import annotations
@@ -58,10 +58,16 @@ import pyarrow.parquet as pq
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from vtla.engine.utils.ee_transforms import ee_to_relative
+# Allow running as a standalone script (python tools/convert_joints_to_eepose.py): put the repo
+# root on sys.path so ``vtla`` is importable regardless of the current working directory.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from vtla.engine.utils.ee_transforms import ee_to_relative  # noqa: E402
 
 # Realman SDK (vendored under deployment/sdk); FK is offline, no arm connection needed.
-_SDK = Path(__file__).resolve().parents[2] / "deployment" / "sdk"
+_SDK = _REPO_ROOT / "deployment" / "sdk"
 if str(_SDK) not in sys.path:
     sys.path.insert(0, str(_SDK))
 

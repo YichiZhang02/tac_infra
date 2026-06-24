@@ -2,5 +2,6 @@
 
 from .base import WristCameraBase
 from .fisheye_grpc import FisheyeGrpcCamera
+from .undistort import WristUndistorter, default_calib_path
 
-__all__ = ["WristCameraBase", "FisheyeGrpcCamera"]
+__all__ = ["WristCameraBase", "FisheyeGrpcCamera", "WristUndistorter", "default_calib_path"]

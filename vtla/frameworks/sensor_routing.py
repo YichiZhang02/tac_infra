@@ -42,7 +42,7 @@ VALID_ACTION_MODES = ("joint", "relative_ee")
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
 VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
 
-# Dataset columns / stats keys added offline by vtla/datasets/convert_joints_to_eepose.py.
+# Dataset columns / stats keys added offline by tools/convert_joints_to_eepose.py.
 OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"  # observation.state_episode_ee
 ACTION_EPISODE_EE = ACTION + "_episode_ee"  # action_episode_ee (per-frame absolute-in-episode)
 ACTION_RELATIVE_EE = ACTION + "_relative_ee"  # stats-only key: relative action St^-1·S_{t+k}
@@ -288,7 +288,7 @@ class SensorRoutingMixin:
             elif OBS_STATE not in self.input_features:
                 raise ValueError(
                     f"state_mode='episode_ee' requires '{OBS_STATE_EPISODE_EE}' in the dataset. "
-                    "Run vtla/datasets/convert_joints_to_eepose.py first."
+                    "Run tools/convert_joints_to_eepose.py first."
                 )
 
     def apply_action_mode(self) -> None:
@@ -309,7 +309,7 @@ class SensorRoutingMixin:
             elif ACTION not in self.output_features:
                 raise ValueError(
                     f"action_mode='relative_ee' requires '{ACTION_EPISODE_EE}' in the dataset. "
-                    "Run vtla/datasets/convert_joints_to_eepose.py first."
+                    "Run tools/convert_joints_to_eepose.py first."
                 )
 
     def add_empty_cameras(self, num: int, image_resolution: tuple[int, int]) -> list[str]:

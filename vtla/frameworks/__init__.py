@@ -14,6 +14,7 @@
 
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
+from .episode_ee_processor import EpisodeEEPreprocessorStep as EpisodeEEPreprocessorStep
 from .factory import get_policy_class, make_policy, make_policy_config, make_pre_post_processors
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .pretrained import PreTrainedPolicy as PreTrainedPolicy
@@ -36,4 +37,6 @@ __all__ = [
     "make_policy",
     "make_policy_config",
     "make_pre_post_processors",
+    # Inference processors
+    "EpisodeEEPreprocessorStep",
 ]

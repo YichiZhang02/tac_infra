@@ -173,6 +173,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
             return new_transition
 
         if self.mode == "pose":
+            if state.device != action.device or state.dtype != action.dtype:
+                state = state.to(device=action.device, dtype=action.dtype)
             new_transition[TransitionKey.ACTION] = ee_to_relative(state, action, n_arms=self.n_arms)
         else:
             mask = self._build_mask(action.shape[-1])
@@ -238,6 +240,11 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
             return new_transition
 
         if self.relative_step.mode == "pose":
+            # Align cached_state to the action's device/dtype. The state is cached before
+            # DeviceProcessorStep moves the transition, so it can be on CPU while the
+            # unnormalized action is on CUDA.
+            if cached_state.device != action.device or cached_state.dtype != action.dtype:
+                cached_state = cached_state.to(device=action.device, dtype=action.dtype)
             new_transition[TransitionKey.ACTION] = ee_to_absolute(
                 cached_state, action, n_arms=self.relative_step.n_arms
             )

@@ -3,8 +3,8 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260623_162109_rm_umi_dual_260618_pick_majiang_256_diffusion_wristonly_false_tactile_none_state_joint_action_joint}
-step=${2:-5000}
+pretrained_id=${1:-20260625_044959_rm_umi_dual_260617_pen_place_cap_notop_undist_256_pi05_wristonly_true_tactile_none_state_joint_action_joint}
+step=${2:-15000}
 
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
 step=$(printf "%06d" "$(expr "$step" + 0)")

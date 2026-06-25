@@ -1,0 +1,243 @@
+{
+    "dataset": {
+        "repo_id": "rm_umi_dual_260617_pen_place_cap_notop_256",
+        "root": "playground/data/rm_umi_dual_260617_pen_place_cap_notop_256",
+        "episodes": null,
+        "image_transforms": {
+            "enable": false,
+            "max_num_transforms": 3,
+            "random_order": false,
+            "tfs": {
+                "brightness": {
+                    "weight": 1.0,
+                    "type": "ColorJitter",
+                    "kwargs": {
+                        "brightness": [
+                            0.8,
+                            1.2
+                        ]
+                    }
+                },
+                "contrast": {
+                    "weight": 1.0,
+                    "type": "ColorJitter",
+                    "kwargs": {
+                        "contrast": [
+                            0.8,
+                            1.2
+                        ]
+                    }
+                },
+                "saturation": {
+                    "weight": 1.0,
+                    "type": "ColorJitter",
+                    "kwargs": {
+                        "saturation": [
+                            0.5,
+                            1.5
+                        ]
+                    }
+                },
+                "hue": {
+                    "weight": 1.0,
+                    "type": "ColorJitter",
+                    "kwargs": {
+                        "hue": [
+                            -0.05,
+                            0.05
+                        ]
+                    }
+                },
+                "sharpness": {
+                    "weight": 1.0,
+                    "type": "SharpnessJitter",
+                    "kwargs": {
+                        "sharpness": [
+                            0.5,
+                            1.5
+                        ]
+                    }
+                },
+                "affine": {
+                    "weight": 1.0,
+                    "type": "RandomAffine",
+                    "kwargs": {
+                        "degrees": [
+                            -5.0,
+                            5.0
+                        ],
+                        "translate": [
+                            0.05,
+                            0.05
+                        ]
+                    }
+                }
+            }
+        },
+        "revision": null,
+        "use_imagenet_stats": true,
+        "video_backend": "pyav",
+        "return_uint8": false,
+        "streaming": false
+    },
+    "policy": {
+        "type": "diffusion",
+        "n_obs_steps": 2,
+        "input_features": {
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    16
+                ]
+            },
+            "observation.images.left_cam_wrist": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    224,
+                    224
+                ]
+            },
+            "observation.images.right_cam_wrist": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    224,
+                    224
+                ]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    16
+                ]
+            }
+        },
+        "device": "cuda",
+        "use_amp": false,
+        "use_peft": false,
+        "push_to_hub": false,
+        "repo_id": null,
+        "private": null,
+        "tags": null,
+        "license": null,
+        "pretrained_path": null,
+        "single_task": "pick up the cap and place it in the cup",
+        "wrist_only": true,
+        "top_camera_keys": [
+            "observation.images.cam_top"
+        ],
+        "wrist_camera_keys": [
+            "observation.images.left_cam_wrist",
+            "observation.images.right_cam_wrist"
+        ],
+        "tactile_mode": "none",
+        "tactile_encoder_type": null,
+        "tactile_keys": [
+            "observation.images.left_cam_finger0",
+            "observation.images.left_cam_finger1",
+            "observation.images.right_cam_finger0",
+            "observation.images.right_cam_finger1"
+        ],
+        "tactile_encoder_path": null,
+        "tactile_insert_location": "decoder",
+        "tactile_num_tokens": 8,
+        "freeze_tactile_encoder": false,
+        "state_mode": "joint",
+        "action_mode": "joint",
+        "ee_num_arms": 2,
+        "horizon": 32,
+        "n_action_steps": 16,
+        "normalization_mapping": {
+            "VISUAL": "MEAN_STD",
+            "STATE": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "drop_n_last_frames": 7,
+        "vision_backbone": "resnet18",
+        "resize_imgs_to": [
+            224,
+            224
+        ],
+        "crop_shape": null,
+        "crop_is_random": true,
+        "pretrained_backbone_weights": null,
+        "use_group_norm": true,
+        "spatial_softmax_num_keypoints": 32,
+        "use_separate_rgb_encoder_per_camera": false,
+        "down_dims": [
+            512,
+            1024,
+            2048
+        ],
+        "kernel_size": 5,
+        "n_groups": 8,
+        "diffusion_step_embed_dim": 128,
+        "use_film_scale_modulation": true,
+        "noise_scheduler_type": "DDPM",
+        "num_train_timesteps": 100,
+        "beta_schedule": "squaredcos_cap_v2",
+        "beta_start": 0.0001,
+        "beta_end": 0.02,
+        "prediction_type": "epsilon",
+        "clip_sample": true,
+        "clip_sample_range": 1.0,
+        "num_inference_steps": null,
+        "do_mask_loss_for_padding": false,
+        "optimizer_lr": 0.0001,
+        "optimizer_betas": [
+            0.95,
+            0.999
+        ],
+        "optimizer_eps": 1e-08,
+        "optimizer_weight_decay": 1e-06,
+        "scheduler_name": "cosine",
+        "scheduler_warmup_steps": 500
+    },
+    "output_dir": "playground/results/models/20260623_212424_rm_umi_dual_260617_pen_place_cap_notop_256_diffusion_wristonly_true_tactile_none_state_joint_action_joint",
+    "job_name": "20260623_212424_rm_umi_dual_260617_pen_place_cap_notop_256_diffusion_wristonly_true_tactile_none_state_joint_action_joint",
+    "resume": false,
+    "seed": 1000,
+    "cudnn_deterministic": false,
+    "num_workers": 4,
+    "batch_size": 16,
+    "prefetch_factor": 4,
+    "persistent_workers": true,
+    "steps": 200000,
+    "log_freq": 100,
+    "tolerance_s": 0.04,
+    "save_checkpoint": true,
+    "save_freq": 10000,
+    "use_policy_training_preset": true,
+    "optimizer": {
+        "type": "adam",
+        "lr": 0.0001,
+        "weight_decay": 1e-06,
+        "grad_clip_norm": 10.0,
+        "betas": [
+            0.95,
+            0.999
+        ],
+        "eps": 1e-08
+    },
+    "scheduler": {
+        "type": "diffuser",
+        "num_warmup_steps": 500,
+        "name": "cosine"
+    },
+    "wandb": {
+        "enable": false,
+        "disable_artifact": false,
+        "project": "lerobot",
+        "entity": null,
+        "notes": null,
+        "run_id": null,
+        "mode": null,
+        "add_tags": true
+    },
+    "peft": null,
+    "rename_map": {},
+    "checkpoint_path": null
+}

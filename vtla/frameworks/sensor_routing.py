@@ -105,6 +105,9 @@ class SensorRoutingMixin:
     action_mode: str = "joint"  # joint | relative_ee
     # Number of arms packed in the EE vectors (per arm = 3 pos + 6 rot6d + 1 gripper = 10 dims).
     ee_num_arms: int = 2
+    # Ordered names of the observation.state joints (populated by make_policy from ds_meta).
+    # Required for EpisodeEEPreprocessorStep to locate joint/gripper indices at inference time.
+    state_feature_names: list[str] | None = None
 
     # ------------------------------------------------------------------
     # Key resolution
@@ -282,14 +285,19 @@ class SensorRoutingMixin:
                 )
         elif self.state_mode == "episode_ee":
             ee_ft = self.input_features.pop(OBS_STATE_EPISODE_EE, None)
-            self.input_features.pop(OBS_STATE, None)
             if ee_ft is not None:
+                # Dataset has the pre-computed column; rename it to canonical OBS_STATE.
+                self.input_features.pop(OBS_STATE, None)
                 self.input_features[OBS_STATE] = ee_ft
             elif OBS_STATE not in self.input_features:
                 raise ValueError(
-                    f"state_mode='episode_ee' requires '{OBS_STATE_EPISODE_EE}' in the dataset. "
-                    "Run tools/convert_joints_to_eepose.py first."
+                    f"state_mode='episode_ee' requires either '{OBS_STATE_EPISODE_EE}' in the dataset "
+                    "(run tools/convert_joints_to_eepose.py for offline datasets) or "
+                    f"'{OBS_STATE}' for real-time inference (an EpisodeEEPreprocessorStep converts "
+                    "joint angles to EE pose at runtime)."
                 )
+            # else: OBS_STATE present but state_episode_ee absent → inference mode.
+            # EpisodeEEPreprocessorStep converts observation.state joints → EE pose before the model.
 
     def apply_action_mode(self) -> None:
         """Route the action according to ``action_mode`` (mirrors :meth:`apply_state_mode`).
@@ -303,8 +311,8 @@ class SensorRoutingMixin:
             self.output_features.pop(ACTION_EPISODE_EE, None)
         elif self.action_mode == "relative_ee":
             ee_ft = self.output_features.pop(ACTION_EPISODE_EE, None)
-            self.output_features.pop(ACTION, None)
             if ee_ft is not None:
+                self.output_features.pop(ACTION, None)
                 self.output_features[ACTION] = ee_ft
             elif ACTION not in self.output_features:
                 raise ValueError(

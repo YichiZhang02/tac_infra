@@ -39,6 +39,7 @@ from vtla.engine.processor import (
 )
 from vtla.engine.utils.constants import (
     ACTION,
+    OBS_STATE,
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
@@ -230,6 +231,17 @@ def make_pre_post_processors(
             to_output=transition_to_policy_action,
         )
         _reconnect_relative_absolute_steps(preprocessor, postprocessor)
+
+        # For state_mode='episode_ee' at inference time the dataset does not supply
+        # observation.state_episode_ee; prepend a step that converts joint angles to
+        # episode-relative EE pose on-the-fly so the model receives the right input.
+        if getattr(policy_cfg, "state_mode", None) == "episode_ee":
+            from .episode_ee_processor import EpisodeEEPreprocessorStep
+
+            state_names = getattr(policy_cfg, "state_feature_names", None) or []
+            ee_step = EpisodeEEPreprocessorStep(state_feature_names=state_names)
+            preprocessor.steps = [ee_step, *preprocessor.steps]
+
         return preprocessor, postprocessor
 
     # Create a new processor based on policy type
@@ -316,15 +328,36 @@ def make_policy(
     kwargs = {}
     features = dataset_to_policy_features(ds_meta.features)
 
-    cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-    if not cfg.input_features:
-        cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+    if cfg.pretrained_path:
+        # When loading a pretrained checkpoint the saved config already has input/output
+        # features routed and shaped for the trained architecture (e.g. 20-dim EE instead
+        # of 16-dim joints for episode_ee mode). Using ds_meta shapes here would construct
+        # the wrong model and cause weight loading errors. Load the checkpoint config once
+        # to recover the correct feature descriptors.
+        from vtla.engine.configs.policies import PreTrainedConfig as _BaseCfg  # noqa: PLC0415
+        _ckpt_cfg = _BaseCfg.from_pretrained(cfg.pretrained_path)
+        if not cfg.input_features:
+            cfg.input_features = _ckpt_cfg.input_features or {}
+        cfg.output_features = _ckpt_cfg.output_features or {
+            key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION
+        }
+    else:
+        cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+        if not cfg.input_features:
+            cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
 
     # Store action feature names for relative_exclude_joints support
     if ds_meta is not None and hasattr(cfg, "action_feature_names"):
         action_names = ds_meta.features.get(ACTION, {}).get("names")
         if action_names is not None:
             cfg.action_feature_names = list(action_names)
+
+    # Store state feature names so EpisodeEEPreprocessorStep can locate joint/gripper indices.
+    # Always read from ds_meta (raw joint names), regardless of pretrained path.
+    if ds_meta is not None and hasattr(cfg, "state_feature_names"):
+        state_names = ds_meta.features.get(OBS_STATE, {}).get("names")
+        if state_names is not None:
+            cfg.state_feature_names = list(state_names)
 
     kwargs["config"] = cfg
 

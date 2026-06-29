@@ -24,7 +24,8 @@ python -m deployment.inference \
   --dataset.repo_id=${repo_id} \
   --match_policy=true \
   --robot.home_joints='{"left_main_joint1": -0.091996, "left_main_joint2": 0.200154, "left_main_joint3": 0.062090, "left_main_joint4": 0.916534, "left_main_joint5": -0.040657, "left_main_joint6": 1.984177, "left_main_joint7": -0.111946, "right_main_joint1": 0.091996, "right_main_joint2": 0.200154, "right_main_joint3": -0.062090, "right_main_joint4": 0.916534, "right_main_joint5": 0.040657, "right_main_joint6": 1.984177, "right_main_joint7": 0.111946}' \
-  --robot.home_gripper=1.0
+  --robot.home_gripper=1.0 \
+  --robot.max_ee_pos_step_m=0.01  # 第一次测试可以启用这个值来防止直接撞
 
 # --- 手动模式示例 (关掉自动对齐时, 硬件/任务需自己给) ---
 # python -m deployment.inference \

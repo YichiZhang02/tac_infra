@@ -627,11 +627,19 @@ class RealmanUGripperDual(Robot):
 
     # ==================== 发送动作 ====================
 
+    def _looks_like_ee_action(self, action: dict[str, Any]) -> bool:
+        """按 action 内容判定是否末端位姿动作 (含 *_ee_x 键)。
+
+        按内容而非 action_space 路由: ee 模式下复位(move_to_home)走关节键, 仍需关节路径;
+        策略推理输出 ee 键, 走 ee 路径。两类键互不相交, 路由干净。
+        """
+        return any(f"{side}_ee_x" in action for side in self._ordered_arms)
+
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} 未连接")
 
-        if self._ee_action:
+        if self._looks_like_ee_action(action):
             return self._send_action_ee(action)
 
         sent_action: dict[str, Any] = {}

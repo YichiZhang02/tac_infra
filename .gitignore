@@ -40,6 +40,6 @@ __pycache__/
 # Vendored hardware SDKs (large binaries, kept locally only)
 deployment/sdk/
 
-# Runtime logs from tactile / device clients
-**/logs/*.log
-**/logs_pc_flux/*.log
+# Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
+/logs/
+/logs_pc_flux/

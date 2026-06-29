@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260625_044959_rm_umi_dual_260617_pen_place_cap_notop_undist_256_pi05_wristonly_true_tactile_none_state_joint_action_joint}
+pretrained_id=${1:-20260624_230105_rm_umi_dual_260617_pen_place_cap_notop_undist_256_diffusion_wristonly_true_tactile_none_state_episode_ee_action_relative_ee}
 step=${2:-15000}
 
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
@@ -23,9 +23,9 @@ python -m deployment.inference \
   --policy.path=${policy_path} \
   --dataset.repo_id=${repo_id} \
   --match_policy=true \
-  --robot.home_joints='{"left_main_joint1": -0.091996, "left_main_joint2": 0.200154, "left_main_joint3": 0.062090, "left_main_joint4": 0.916534, "left_main_joint5": -0.040657, "left_main_joint6": 1.984177, "left_main_joint7": -0.111946, "right_main_joint1": 0.091996, "right_main_joint2": 0.200154, "right_main_joint3": -0.062090, "right_main_joint4": 0.916534, "right_main_joint5": 0.040657, "right_main_joint6": 1.984177, "right_main_joint7": 0.111946}' \
+  --robot.home_joints='{"left_main_joint1": -0.018531, "left_main_joint2": 0.24981, "left_main_joint3": 0.155477, "left_main_joint4": 1.486658, "left_main_joint5": 0.042135, "left_main_joint6": 1.292984, "left_main_joint7": 0.120061, "right_main_joint1": 0.053178, "right_main_joint2": 0.188806, "right_main_joint3": -0.154118, "right_main_joint4": 1.481587, "right_main_joint5": -0.002833, "right_main_joint6": 1.343616, "right_main_joint7": -0.149679}' \
   --robot.home_gripper=1.0 \
-  --robot.max_ee_pos_step_m=0.01  # 第一次测试可以启用这个值来防止直接撞
+  --robot.max_ee_pos_step_m=0.1  # ee用这个值来防止直接撞 初次0.01 后面0.1
 
 # --- 手动模式示例 (关掉自动对齐时, 硬件/任务需自己给) ---
 # python -m deployment.inference \

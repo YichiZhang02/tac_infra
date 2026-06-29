@@ -346,6 +346,24 @@ python -m deployment.inference \
 
 > 推理录制的评测数据集默认落到 `playground/eval/<repo_id 末段>`。
 
+### home_joints 设置
+
+`--robot.home_joints` 指定每次推理开始前机械臂复位的目标关节位置 (弧度)。初始值可用工具脚本从当前硬件实时读取:
+
+```bash
+# 连接双臂, 读取当前关节位置, 输出可直接贴入 inference.sh 的参数行
+python -m deployment.tools.read_home_joints
+
+# 只读左臂 / 只读右臂
+python -m deployment.tools.read_home_joints --side left
+python -m deployment.tools.read_home_joints --side right
+
+# 自定义 IP (默认 left=192.168.1.200, right=192.168.1.201)
+python -m deployment.tools.read_home_joints --left-ip 192.168.1.200 --right-ip 192.168.1.201
+```
+
+stdout 直接输出 `--robot.home_joints='...'` 字符串, 复制后替换 `inference.sh` 第 26 行即可; stderr 逐关节打印数值方便核对。
+
 ### 腕部鱼眼去畸变 (训练-推理一致)
 
 若模型是在去畸变数据集上训练的(腕部=鱼眼去畸变+居中裁 896), 推理时必须对原生鱼眼帧做**相同**变换, 否则几何不一致(训练-推理 gap)。`--match_policy` 会**自动判定并开启**, 无需手动:

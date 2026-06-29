@@ -15,6 +15,7 @@ from .converters import (
     transition_to_policy_action,
 )
 from .device_processor import DeviceProcessorStep
+from .episode_ee_world_processor import EpisodeEEToWorldStep
 from .normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep
 from .pipeline import (
     ObservationProcessorStep,
@@ -30,6 +31,7 @@ __all__ = [
     "AbsoluteActionsProcessorStep",
     "AddBatchDimensionProcessorStep",
     "DeviceProcessorStep",
+    "EpisodeEEToWorldStep",
     "EnvAction",
     "EnvTransition",
     "NormalizerProcessorStep",

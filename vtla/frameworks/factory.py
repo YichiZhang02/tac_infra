@@ -236,11 +236,24 @@ def make_pre_post_processors(
         # observation.state_episode_ee; prepend a step that converts joint angles to
         # episode-relative EE pose on-the-fly so the model receives the right input.
         if getattr(policy_cfg, "state_mode", None) == "episode_ee":
+            from vtla.engine.processor import EpisodeEEToWorldStep
+
             from .episode_ee_processor import EpisodeEEPreprocessorStep
 
             state_names = getattr(policy_cfg, "state_feature_names", None) or []
             ee_step = EpisodeEEPreprocessorStep(state_feature_names=state_names)
             preprocessor.steps = [ee_step, *preprocessor.steps]
+
+            # For action_mode='relative_ee' the postprocessor (AbsoluteActionsProcessorStep) only
+            # recovers the action relative to the episode first frame (S_{t+k}). Append a step that
+            # lifts it to the world frame (A_{t+k} = A0 · S_{t+k}) using A0 cached by ee_step, so
+            # the robot receives an absolute world EE pose to execute.
+            if getattr(policy_cfg, "action_mode", None) == "relative_ee":
+                world_step = EpisodeEEToWorldStep(
+                    n_arms=getattr(policy_cfg, "ee_num_arms", 2),
+                    ee_step=ee_step,
+                )
+                postprocessor.steps = [*postprocessor.steps, world_step]
 
         return preprocessor, postprocessor
 

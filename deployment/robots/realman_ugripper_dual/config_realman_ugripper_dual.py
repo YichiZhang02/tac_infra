@@ -140,6 +140,24 @@ class RealmanUGripperDualConfig(RobotConfig):
     max_relative_target: float | dict[str, float] | None = None
     use_degrees: bool = False  # False = 弧度制
 
+    # ============ 动作空间 (joint | ee) ============
+    # "joint": action = 16 维关节角 (默认, 采集/遥操作不受影响)。
+    # "ee"   : action = 20 维末端位姿 (右臂在前, 每臂 [xyz, rot6d, gripper]); send_action 走
+    #          rm_movep_canfd 笛卡尔在线控制。由 inference.py --match_policy 按 checkpoint 的
+    #          action_mode (relative_ee -> ee) 自动设定, 一般无需手填。
+    action_space: str = "joint"
+    # rm_movep_canfd 透传参数 (ee 模式下生效)
+    canfd_follow: bool = False        # False=非跟随(轨迹模式), True=透传跟随
+    canfd_trajectory_mode: int = 0    # 0=轨迹模式
+    canfd_radio: int = 0              # 平滑系数 0~100
+    # ee 模式笛卡尔单步安全限幅 (当前->目标 这一步, None=不限)。movep 绕过关节 max_relative_target,
+    # 故这里是 ee 模式下的主要安全网, 配合控制器自身限幅。
+    max_ee_pos_step_m: float | None = 0.05
+    max_ee_rot_step_deg: float | None = 15.0
+    # 上电自检: ee 模式下检查工具/工作坐标系是否≈单位 (movep 位姿系须= rm_algo_forward_kinematics
+    # 的 flange/base 系, 否则有系统性偏移)。True=不符仅告警; 设 False 跳过自检。
+    ee_frame_check: bool = True
+
     # ============ 自动复位 (move_to_home) ============
     # 各关节 home 目标值: key = "{side}_{joint_name}", value 单位与 use_degrees 一致。
     # None = 连接时自动读取当前位置 (推荐: 启动前先把机械臂摆到想要的初始姿态)。

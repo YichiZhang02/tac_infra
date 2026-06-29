@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from deployment.hardware.top_cameras import make_top_cameras_from_configs
 from deployment.hardware.calibration import MotorCalibration
@@ -62,6 +63,31 @@ from deployment.hardware.follower_arms import RealmanTcpFollower
 sys.path.append(str(Path(__file__).resolve().parents[2] / "sdk"))
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# EE-pose 数学辅助 (numpy) —— 与训练侧 vtla/engine/utils/ee_kinematics.py 同源 (flange 系, 无 tcp 外参)
+# ============================================================================
+def _rot6d_to_mat(rot6d: np.ndarray) -> np.ndarray:
+    """6D -> 旋转矩阵 (Gram-Schmidt 正交化)。policy 输出未必严格正交, 故需正交化。"""
+    a1 = np.asarray(rot6d[:3], dtype=np.float64)
+    a2 = np.asarray(rot6d[3:6], dtype=np.float64)
+    b1 = a1 / (np.linalg.norm(a1) + 1e-8)
+    a2 = a2 - np.dot(b1, a2) * b1
+    b2 = a2 / (np.linalg.norm(a2) + 1e-8)
+    b3 = np.cross(b1, b2)
+    return np.stack([b1, b2, b3], axis=1)  # 列向量 [b1|b2|b3]
+
+
+def _mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
+    """旋转矩阵 -> 6D (前两列, Zhou et al. 2019)。"""
+    return np.concatenate([mat[:, 0], mat[:, 1]]).astype(np.float64)
+
+
+def _mat_to_quat_wxyz(mat: np.ndarray) -> list[float]:
+    """旋转矩阵 -> [qw, qx, qy, qz] (RM API 顺序)。"""
+    qx, qy, qz, qw = R.from_matrix(mat).as_quat()  # scipy 返回 (x,y,z,w)
+    return [float(qw), float(qx), float(qy), float(qz)]
 
 
 class _ArmDevices:
@@ -94,6 +120,10 @@ class RealmanUGripperDual(Robot):
     JOINT_NAMES = [f"main_joint{i}" for i in range(1, 8)]
     GRIPPER_NAME = "main_gripper"
 
+    # EE-pose 模式 (action_space="ee") 的每臂 20 维布局名 + 固定臂序 (右臂在前, 与训练 build_names 一致)
+    EE_NAMES = ["ee_x", "ee_y", "ee_z"] + [f"ee_rot6d_{i}" for i in range(6)] + ["gripper"]
+    _SIDE_ORDER = ("right", "left")
+
     def __init__(self, config: RealmanUGripperDualConfig):
         super().__init__(config)
         self.config = config
@@ -114,6 +144,11 @@ class RealmanUGripperDual(Robot):
         # 各臂 home 目标关节位置 (单位同 read_joints / send_joints, 即 use_degrees 决定)
         # connect() 后由 _capture_home_joints() 填充
         self._home_joints: dict[str, list[float]] = {}
+
+        # 动作空间: "ee" 时 action_features 改为 20 维末端位姿, send_action 走 rm_movep_canfd。
+        # observation 始终产出关节 (state 的 EE 化由推理 preprocessor 负责)。
+        self._ee_action = str(getattr(config, "action_space", "joint")).lower() == "ee"
+        self._algo = None  # 离线 FK 句柄 (ee 模式安全限幅用; 不占实时控制句柄)
 
     # ==================== 配置辅助 ====================
 
@@ -146,6 +181,40 @@ class RealmanUGripperDual(Robot):
                 ft[f"{side}_{joint}"] = float
             ft[f"{side}_{self.GRIPPER_NAME}"] = float
         return ft
+
+    @property
+    def _ordered_arms(self) -> list[str]:
+        """启用的手臂, 强制 right->left 顺序 (与训练 EE 布局 build_names 一致)。"""
+        return [s for s in self._SIDE_ORDER if s in self.config.arms]
+
+    @property
+    def _pose_ft(self) -> dict[str, type]:
+        """EE-pose 动作布局: 20 维, 右臂在前, 每臂 [xyz(3), rot6d(6), gripper(1)]。"""
+        ft: dict[str, type] = {}
+        for side in self._ordered_arms:
+            for n in self.EE_NAMES:
+                ft[f"{side}_{n}"] = float
+        return ft
+
+    def _ensure_algo(self):
+        """离线 FK 句柄 (RM-75-E), 用于 ee 模式安全限幅时读当前 flange 位姿。懒加载。"""
+        if self._algo is None:
+            from Robotic_Arm.rm_ctypes_wrap import rm_force_type_e, rm_robot_arm_model_e
+            from Robotic_Arm.rm_robot_interface import Algo
+
+            self._algo = Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
+        return self._algo
+
+    def _current_flange(self, side: str) -> tuple[np.ndarray, np.ndarray]:
+        """读当前关节 -> FK -> 基座系 flange 位姿 (p(3,), R(3,3))。与训练 FK 同系 (无 tcp 外参)。"""
+        arm = self._arms[side]
+        joints = arm.follower.read_joints() if arm.follower is not None else [0.0] * self.DOF
+        joints_deg = (list(joints) if self.config.use_degrees
+                      else [float(np.degrees(j)) for j in joints])
+        pose = self._ensure_algo().rm_algo_forward_kinematics(joints_deg, flag=0)  # [x,y,z,qw,qx,qy,qz]
+        p = np.asarray(pose[:3], dtype=np.float64)
+        mat = R.from_quat([pose[4], pose[5], pose[6], pose[3]]).as_matrix()  # scipy (x,y,z,w)
+        return p, mat
 
     @property
     def _stream_ft(self) -> dict[str, tuple]:
@@ -197,7 +266,8 @@ class RealmanUGripperDual(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return self._motors_ft
+        # ee 模式: 20 维末端位姿 (与 policy 的 relative_ee 输出对齐); 否则 16 维关节角。
+        return self._pose_ft if self._ee_action else self._motors_ft
 
     # ==================== 连接状态 ====================
 
@@ -251,7 +321,33 @@ class RealmanUGripperDual(Robot):
 
         time.sleep(0.5)
         self._capture_home_joints()
+        if self._ee_action and self.config.ee_frame_check:
+            self._check_ee_frames()
         logger.info(f"{self} 连接完成 (ugripper 双臂, 启用: {self.config.arms})")
+
+    def _check_ee_frames(self) -> None:
+        """ee 模式自检: 工具/工作坐标系须≈单位, 否则 movep 位姿系 != 训练 FK 的 flange/base 系。
+
+        不符仅告警 (不阻断), 由使用者决定清除工具/工作系或退回 joint 动作空间。
+        """
+        tol = 1e-3  # m / rad
+        for side, arm in self._arms.items():
+            if arm.follower is None:
+                continue
+            tool, work = arm.follower.get_tool_work_frames()
+            for label, fr in (("工具", tool), ("工作", work)):
+                if fr is None:
+                    logger.warning(f"[{side}] 无法读取{label}坐标系, 跳过 ee 自检 (movep 位姿系无法确认)")
+                    continue
+                pose = fr.get("pose") or [0.0] * 6
+                if any(abs(v) > tol for v in pose):
+                    logger.warning(
+                        f"[{side}] ⚠️ {label}坐标系非单位 (name={fr.get('name')!r}, pose={pose}); "
+                        f"rm_movep_canfd 的位姿系将偏离训练 FK 的 flange/base 系, EE 动作会有系统性偏移。"
+                        f"请在控制器侧清成单位工具/工作系, 或改用 action_space=joint。"
+                    )
+                else:
+                    logger.info(f"[{side}] ee 自检: {label}坐标系≈单位 (name={fr.get('name')!r})")
 
     def _connect_one_arm(self, side: str) -> None:
         """连接单条臂的全部从臂侧设备 (供并行线程调用)。"""
@@ -535,6 +631,9 @@ class RealmanUGripperDual(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} 未连接")
 
+        if self._ee_action:
+            return self._send_action_ee(action)
+
         sent_action: dict[str, Any] = {}
 
         for side in self.config.arms:
@@ -570,6 +669,80 @@ class RealmanUGripperDual(Robot):
             sent_action[f"{side}_{self.GRIPPER_NAME}"] = (
                 float(gripper_val) if gripper_val is not None else 0.0
             )
+
+        return sent_action
+
+    # ==================== 发送动作 (EE-pose, rm_movep_canfd) ====================
+
+    def _clamp_ee_step(
+        self, p_cur: np.ndarray, R_cur: np.ndarray, p_tgt: np.ndarray, R_tgt: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """把「当前->目标」单步的位置/姿态变化限幅 (ee 模式安全网, movep 绕过关节限幅)。"""
+        cfg = self.config
+
+        p_step = p_tgt - p_cur
+        if cfg.max_ee_pos_step_m is not None:
+            n = float(np.linalg.norm(p_step))
+            if n > cfg.max_ee_pos_step_m:
+                p_step = p_step * (cfg.max_ee_pos_step_m / n)
+        p_out = p_cur + p_step
+
+        R_step = R_cur.T @ R_tgt  # 当前局部系下的相对旋转
+        if cfg.max_ee_rot_step_deg is not None:
+            rotvec = R.from_matrix(R_step).as_rotvec()
+            ang = float(np.degrees(np.linalg.norm(rotvec)))
+            if ang > cfg.max_ee_rot_step_deg and ang > 1e-6:
+                rotvec = rotvec * (cfg.max_ee_rot_step_deg / ang)
+                R_step = R.from_rotvec(rotvec).as_matrix()
+        R_out = R_cur @ R_step
+        return p_out, R_out
+
+    def _send_action_ee(self, action: dict[str, Any]) -> dict[str, Any]:
+        """收基座系绝对 flange 位姿 (20 维, 右臂在前) -> 单步限幅 -> rm_movep_canfd 透传。
+
+        位姿系与训练 FK 同源 (rm_algo_forward_kinematics 的 flange/base 系, 无 tcp 外参);
+        movep 直接吃该 flange 世界位姿。夹爪走绝对归一化。
+        """
+        sent_action: dict[str, Any] = {}
+
+        for side in self._ordered_arms:
+            arm = self._arms[side]
+            keys = [f"{side}_{n}" for n in self.EE_NAMES]
+            if not all(k in action for k in keys[:9]):  # 至少要有位姿 9 维
+                logger.warning(f"[{side}] EE 动作缺少位姿字段, 跳过本臂")
+                continue
+
+            # 1. 解析 policy 输出的基座系绝对目标位姿 + 绝对夹爪
+            p_tgt = np.array([action[f"{side}_ee_x"],
+                              action[f"{side}_ee_y"],
+                              action[f"{side}_ee_z"]], dtype=np.float64)
+            R_tgt = _rot6d_to_mat(np.array([action[f"{side}_ee_rot6d_{i}"] for i in range(6)],
+                                           dtype=np.float64))
+            grip = action.get(f"{side}_gripper", None)
+
+            # 2. 以当前 flange 为基准做单步安全限幅
+            p_cur, R_cur = self._current_flange(side)
+            p_tgt, R_tgt = self._clamp_ee_step(p_cur, R_cur, p_tgt, R_tgt)
+
+            # 3. 透传下发 (pose7 = [x,y,z,qw,qx,qy,qz])
+            if arm.follower is not None:
+                quat = _mat_to_quat_wxyz(R_tgt)
+                pose7 = [float(p_tgt[0]), float(p_tgt[1]), float(p_tgt[2]), *quat]
+                arm.follower.send_pose(
+                    pose7,
+                    follow=self.config.canfd_follow,
+                    trajectory_mode=self.config.canfd_trajectory_mode,
+                    radio=self.config.canfd_radio,
+                )
+
+            # 4. 夹爪 (绝对归一化 [0,1])
+            if grip is not None and arm.gripper is not None:
+                arm.gripper.move_norm(float(grip))
+
+            # 回填实际下发的 (限幅后) 绝对位姿 + 夹爪
+            sent_vals = [*p_tgt, *_mat_to_rot6d(R_tgt), (float(grip) if grip is not None else 0.0)]
+            for n, v in zip(self.EE_NAMES, sent_vals):
+                sent_action[f"{side}_{n}"] = float(v)
 
         return sent_action
 

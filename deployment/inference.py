@@ -181,9 +181,35 @@ def _apply_match_policy(cfg: InferenceConfig) -> None:
     # 腕部去畸变: 按 checkpoint 自动判定 (消除训练-推理 gap)
     _resolve_undistort(cfg)
 
+    # 动作空间: 按 checkpoint 的 action_mode 自动设 (relative_ee -> ee), 堵住"训练EE/推理joint"静默错配。
+    _resolve_action_space(cfg)
+
     logger.info(f"[match-policy] 对齐结果: use_tactile={cfg.robot.use_tactile}, "
                 f"cameras={list(getattr(cfg.robot, 'cameras', {}) or {})}, "
-                f"undistort_wrist={getattr(cfg.robot, 'undistort_wrist', 'n/a')}")
+                f"undistort_wrist={getattr(cfg.robot, 'undistort_wrist', 'n/a')}, "
+                f"action_space={getattr(cfg.robot, 'action_space', 'n/a')}")
+
+
+def _resolve_action_space(cfg: InferenceConfig) -> None:
+    """按 checkpoint 的 action_mode 对齐机器人动作空间, 并做硬校验防止带病起跑。
+
+    - action_mode='relative_ee' -> robot.action_space='ee' (机器人发末端位姿, 走 rm_movep_canfd)
+    - 否则                       -> 'joint'
+    机器人不支持 action_space 字段时: 若 checkpoint 需要 ee, 直接报错 (该机器人无法执行 EE 动作,
+    继续会把位姿当关节弧度下发 -> 撞机)。
+    """
+    needs_ee = getattr(cfg.policy, "action_mode", None) == "relative_ee"
+    if not hasattr(cfg.robot, "action_space"):
+        if needs_ee:
+            raise ValueError(
+                f"checkpoint 的 action_mode=relative_ee 需要 EE 动作空间, 但机器人 "
+                f"'{getattr(cfg.robot, 'type', cfg.robot)}' 不支持 action_space 字段。"
+                "请使用支持 EE 的机器人 (如 realman_ugripper_dual)。"
+            )
+        return
+    cfg.robot.action_space = "ee" if needs_ee else "joint"
+    logger.info(f"[match-policy] action_space <- action_mode={getattr(cfg.policy, 'action_mode', None)!r}: "
+                f"{cfg.robot.action_space}")
 
 
 @parser.wrap()

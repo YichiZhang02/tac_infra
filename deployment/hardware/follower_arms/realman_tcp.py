@@ -162,6 +162,44 @@ class RealmanTcpFollower(FollowerArmBase):
             logger.warning(f"[{self.name}] 发送关节动作失败, 错误码: {ret}")
         return ret
 
+    def send_pose(
+        self, pose7, follow: bool = False, trajectory_mode: int = 0, radio: int = 0
+    ) -> int:
+        """下发笛卡尔目标位姿 (基座系绝对), 控制器侧做 IK。返回 SDK 错误码 (0=成功)。
+
+        pose7: [x, y, z, qw, qx, qy, qz] —— 位置 (米) + 四元数 (RM API 顺序 wxyz)。
+        位姿系须与 rm_algo_forward_kinematics 一致 (默认无工具/工作系 = flange/base);
+        若控制器设了非单位工具系/工作系, movep 的位姿会被偏移, 调用方需自行对齐。
+        """
+        if self._arm is None:
+            return -1
+        ret = self._arm.rm_movep_canfd(list(pose7), follow, trajectory_mode, radio)
+        if ret != 0:
+            logger.warning(f"[{self.name}] 发送位姿动作失败, 错误码: {ret}")
+        return ret
+
+    def get_tool_work_frames(self) -> tuple[dict | None, dict | None]:
+        """读当前工具坐标系 / 工作坐标系 (用于上电自检 movep 位姿系是否= flange/base)。
+
+        失败返回 (None, None) 对应项。不抛异常 (自检用)。
+        """
+        tool = work = None
+        if self._arm is None:
+            return tool, work
+        try:
+            ret_t, tool = self._arm.rm_get_current_tool_frame()
+            if ret_t != 0:
+                tool = None
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[{self.name}] 读取工具坐标系失败: {e}")
+        try:
+            ret_w, work = self._arm.rm_get_current_work_frame()
+            if ret_w != 0:
+                work = None
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[{self.name}] 读取工作坐标系失败: {e}")
+        return tool, work
+
     def move_to(self, target_positions, duration_s: float = 4.0, fps: float = 30.0) -> None:
         """平滑运动到目标关节位置 (cosine ease-in/out 插值, 通过 rm_movej_canfd 分步执行)。
 

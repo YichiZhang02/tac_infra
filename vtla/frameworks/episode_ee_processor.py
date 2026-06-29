@@ -47,6 +47,7 @@ from vtla.engine.utils.ee_kinematics import (
     compute_baseline,
     joint_indices,
     make_realman_algo,
+    mat_to_rot6d,
     to_episode_ee,
 )
 
@@ -68,10 +69,12 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
         self._algo = make_realman_algo()
         self._jidx: dict = joint_indices(self.state_feature_names)
         self._baseline: tuple | None = None  # ((R_p0, R_R0), (L_p0, L_R0))
+        self._a0_packed: torch.Tensor | None = None  # (1, 20) world-flange EE at episode start
 
     def reset(self) -> None:
         """Clear the episode-start baseline; called at the start of each episode."""
         self._baseline = None
+        self._a0_packed = None
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         """Replace ``observation.state`` (joints) with the 20-dim episode-relative EE pose."""
@@ -86,10 +89,36 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
 
         if self._baseline is None:
             self._baseline = compute_baseline(self._algo, vec16, self._jidx)
+            self._a0_packed = self._pack_baseline(self._baseline)
 
         ee_vec = to_episode_ee(self._algo, vec16, self._jidx, self._baseline)  # float32 (20,)
         observation[OBS_STATE] = torch.from_numpy(ee_vec)
         return observation
+
+    @staticmethod
+    def _pack_baseline(baseline: tuple) -> torch.Tensor:
+        """Pack the episode-start FK baseline into a (1, 20) world-flange EE vector.
+
+        Layout matches the offline ``build_names``: RIGHT arm first then LEFT, per arm
+        ``[pos(3), rot6d(6), gripper(1)]``. The gripper slot is filled with 0.0 because the
+        absolute-pose composition (``ee_to_absolute``) carries the gripper from the action side,
+        never from this reference baseline.
+        """
+        (Rp0, RR0), (Lp0, LR0) = baseline
+        vec = np.concatenate([
+            Rp0, mat_to_rot6d(RR0), [0.0],
+            Lp0, mat_to_rot6d(LR0), [0.0],
+        ]).astype(np.float32)
+        return torch.from_numpy(vec).unsqueeze(0)  # (1, 20)
+
+    def get_baseline_ee(self) -> torch.Tensor | None:
+        """Return the cached (1, 20) world-frame EE pose of the episode's FIRST frame (A0).
+
+        Used by the inference-time :class:`EpisodeEEToWorldStep` to lift the model's
+        episode-relative action ``S_{t+k}`` back into the world frame: ``A_{t+k} = A0 · S_{t+k}``.
+        ``None`` until the first observation of an episode has been seen.
+        """
+        return self._a0_packed
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]

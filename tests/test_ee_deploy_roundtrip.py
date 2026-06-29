@@ -39,6 +39,7 @@ from vtla.engine.utils.ee_transforms import (  # noqa: E402
     matrix_to_rot6d,
     rot6d_to_matrix,
 )
+from vtla.engine.utils.constants import OBS_STATE  # noqa: E402
 
 algo = Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
 
@@ -129,7 +130,78 @@ def main():
     print("  ✓ grippers carried through (absolute)")
 
 
+def test_deploy_classes():
+    """Same chain but through the ACTUAL inference classes (proves the wiring, not just the math):
+
+      EpisodeEEPreprocessorStep  : joints -> S_t (model input) + caches A0 (get_baseline_ee)
+      AbsoluteActionsProcessorStep: a_rel -> S_{t+k}   (already covered by main(), reused here)
+      EpisodeEEToWorldStep        : S_{t+k} -> world A_{t+k}  (uses cached A0)
+      robot _send_action_ee math  : rot6d -> matrix -> quat -> pose7 reaches the commanded flange pose
+    """
+    import pyarrow.parquet as pq
+
+    from vtla.frameworks.episode_ee_processor import EpisodeEEPreprocessorStep
+    from vtla.engine.processor.episode_ee_world_processor import EpisodeEEToWorldStep
+    from deployment.robots.realman_ugripper_dual.realman_ugripper_dual import (
+        _mat_to_quat_wxyz,
+        _rot6d_to_mat,
+    )
+
+    ds = ROOT / "playground/data/rm_umi_dual_pen_open"
+    df = pq.read_table(ds / "data/chunk-000/file-000.parquet",
+                       columns=["observation.state", "episode_index"]).to_pandas()
+    names = __import__("json").load(open(ds / "meta/info.json"))["features"]["observation.state"]["names"]
+    jidx = {"rj": [names.index(f"right_main_joint{i}") for i in range(1, 8)],
+            "lj": [names.index(f"left_main_joint{i}") for i in range(1, 8)],
+            "rg": names.index("right_main_gripper"), "lg": names.index("left_main_gripper")}
+    ep0 = df[df["episode_index"] == 0].reset_index(drop=True)
+    j = np.stack(ep0["observation.state"].to_numpy()).astype(np.float64)
+    t, k = 50, 8
+
+    # --- preprocessor: episode-start sets A0, step t produces S_t ---
+    ee = EpisodeEEPreprocessorStep(state_feature_names=names)
+    ee.reset()
+    ee.observation({OBS_STATE: torch.tensor(j[0])})           # episode start -> caches A0
+    St = ee.observation({OBS_STATE: torch.tensor(j[t])})[OBS_STATE].unsqueeze(0).double()  # (1,20)
+
+    A0 = ee.get_baseline_ee().double()                        # (1,20)
+    A0_gt = torch.tensor(world_packed(j[0], jidx)).unsqueeze(0)
+    pose_dims = [i for i in range(20) if i not in (9, 19)]     # gripper slots are 0 in A0 by design
+    a0_err = (A0[0, pose_dims] - A0_gt[0, pose_dims]).abs().max().item()
+    assert a0_err < 1e-4, f"A0 packing mismatch vs world FK: {a0_err}"
+    print(f"  ✓ EpisodeEEPreprocessorStep.get_baseline_ee == world FK(first frame): max err {a0_err:.2e}")
+
+    # also confirm S_t equals the reference encode (A0^-1 . A_t)
+    St_ref = ee_to_relative(A0_gt, torch.tensor(world_packed(j[t], jidx)).unsqueeze(0))
+    st_err = (St[0, pose_dims] - St_ref[0, pose_dims]).abs().max().item()
+    assert st_err < 1e-4, f"S_t mismatch: {st_err}"
+
+    # --- model target, then full decode through the real world step ---
+    Stk = ee_to_relative(A0_gt, torch.tensor(world_packed(j[t + k], jidx)).unsqueeze(0))
+    a_rel = ee_to_relative(St, Stk)
+    Stk_rec = ee_to_absolute(St, a_rel)                       # AbsoluteActionsProcessorStep equivalent
+    world_step = EpisodeEEToWorldStep(n_arms=2, ee_step=ee)
+    Atk_rec = world_step.action(Stk_rec)                      # the NEW step
+
+    Atk_gt = torch.tensor(world_packed(j[t + k], jidx)).unsqueeze(0)
+    w_err = (Atk_rec[0, pose_dims] - Atk_gt[0, pose_dims]).abs().max().item()
+    assert w_err < 1e-4, f"EpisodeEEToWorldStep world pose mismatch: {w_err}"
+    print(f"  ✓ EpisodeEEToWorldStep recovers world pose A_t+k: max err {w_err:.2e}")
+
+    # --- robot send_action_ee math: rot6d -> R -> quat -> back to rot6d reaches the same pose ---
+    p = Atk_rec[0].numpy()
+    for side, arm_pose in (("right", p[:10]), ("left", p[10:])):
+        R_tgt = _rot6d_to_mat(arm_pose[3:9])
+        quat = _mat_to_quat_wxyz(R_tgt)                      # [qw,qx,qy,qz] sent to rm_movep_canfd
+        R_back = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
+        rot_err = np.abs(matrix_to_rot6d(torch.tensor(R_back)).numpy() - arm_pose[3:9]).max()
+        assert rot_err < 1e-6, f"{side} rot6d->quat->rot6d mismatch: {rot_err}"
+    print("  ✓ robot _send_action_ee rot6d->matrix->quat round-trips (flange pose preserved)")
+
+
 if __name__ == "__main__":
     print("EE deployment round-trip proof:")
     main()
+    print("EE deployment class-wiring proof:")
+    test_deploy_classes()
     print("ALL PASSED ✅")

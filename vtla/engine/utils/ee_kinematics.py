@@ -146,6 +146,27 @@ def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline) -> np.ndarray:
     ).astype(np.float32)
 
 
+def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
+    """Single-arm: absolute EE in the robot base frame (no T0). 10-dim [pos(3), rot6d(6), gripper(1)]."""
+    return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
+
+
+def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
+    """Convert 16-dim joint vector to 20-dim base-frame EE pose (Tt, no episode baseline).
+
+    Same packing/layout as :func:`to_episode_ee` (RIGHT arm first then LEFT, per arm
+    ``[pos(3), rot6d(6), gripper(1)]``) but expressed in the robot base frame directly, so it keeps
+    the absolute workspace position. Used by state_mode='absolute_ee'.
+
+    Returns:
+        20-dim float32 array [right_arm(10), left_arm(10)].
+    """
+    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
+    return np.concatenate(
+        [absolute_arm_ee(rp, rm, rg), absolute_arm_ee(lp, lm, lg)]
+    ).astype(np.float32)
+
+
 def compute_baseline(algo, vec16: np.ndarray, jidx: dict) -> tuple:
     """Compute the episode-start FK baseline from the first-frame joint state.
 

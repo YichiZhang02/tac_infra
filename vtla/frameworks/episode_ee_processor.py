@@ -48,6 +48,7 @@ from vtla.engine.utils.ee_kinematics import (
     joint_indices,
     make_realman_algo,
     mat_to_rot6d,
+    to_absolute_ee,
     to_episode_ee,
 )
 
@@ -55,15 +56,21 @@ from vtla.engine.utils.ee_kinematics import (
 @dataclass
 @ProcessorStepRegistry.register(name="episode_ee_state_processor")
 class EpisodeEEPreprocessorStep(ObservationProcessorStep):
-    """Convert ``observation.state`` from joint angles to episode-relative EE pose.
+    """Convert ``observation.state`` from joint angles to EE pose at inference time.
 
     Args:
         state_feature_names: Ordered names of each dimension of ``observation.state``
             (e.g. ``["right_joint_1", ..., "right_gripper", "left_joint_1", ...]``).
             Used to locate the per-arm joint and gripper indices.
+        relative_to_baseline: If ``True`` (state_mode='episode_ee') the EE pose is expressed
+            relative to each episode's FIRST frame (T0^-1·Tt) and the episode-start world pose A0 is
+            cached for the paired :class:`EpisodeEEToWorldStep`. If ``False``
+            (state_mode='absolute_ee') the pose is the raw base-frame FK (Tt, no T0) and no A0 is
+            cached — the model output already decodes straight to world flange poses.
     """
 
     state_feature_names: list[str] = field(default_factory=list)
+    relative_to_baseline: bool = True
 
     def __post_init__(self) -> None:
         self._algo = make_realman_algo()
@@ -77,7 +84,11 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
         self._a0_packed = None
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
-        """Replace ``observation.state`` (joints) with the 20-dim episode-relative EE pose."""
+        """Replace ``observation.state`` (joints) with the 20-dim EE pose.
+
+        episode_ee (``relative_to_baseline=True``): pose relative to the episode's first frame.
+        absolute_ee (``relative_to_baseline=False``): raw base-frame FK, no baseline.
+        """
         raw = observation.get(OBS_STATE)
         if raw is None:
             return observation
@@ -86,6 +97,11 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
             vec16 = raw.detach().cpu().numpy().astype(np.float64).flatten()
         else:
             vec16 = np.asarray(raw, dtype=np.float64).flatten()
+
+        if not self.relative_to_baseline:
+            ee_vec = to_absolute_ee(self._algo, vec16, self._jidx)  # float32 (20,)
+            observation[OBS_STATE] = torch.from_numpy(ee_vec)
+            return observation
 
         if self._baseline is None:
             self._baseline = compute_baseline(self._algo, vec16, self._jidx)
@@ -134,4 +150,7 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
         return features
 
     def get_config(self) -> dict[str, Any]:
-        return {"state_feature_names": self.state_feature_names}
+        return {
+            "state_feature_names": self.state_feature_names,
+            "relative_to_baseline": self.relative_to_baseline,
+        }

@@ -61,10 +61,10 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         transition = transition.copy()
 
-        if self.state_mode not in ["none", "joint", "episode_ee"]:
+        if self.state_mode not in ["none", "joint", "episode_ee", "absolute_ee"]:
             raise ValueError(
                 f"Invalid PI05 state_mode: {self.state_mode}. "
-                "Expected one of: 'none', 'joint', 'episode_ee'."
+                "Expected one of: 'none', 'joint', 'episode_ee', 'absolute_ee'."
             )
 
         tasks = transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).get(self.task_key)
@@ -73,8 +73,8 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
         if isinstance(tasks, str):
             tasks = [tasks]
 
-        # episode_ee is treated like joint here: the (already normalized) proprio state vector is
-        # discretized into the prompt. The only difference is its semantics/dim (EE pose vs joints).
+        # episode_ee / absolute_ee are treated like joint here: the (already normalized) proprio
+        # state vector is discretized into the prompt. Only its semantics/dim differ (EE pose vs joints).
         full_prompts = []
         if self.state_mode == "none":
             for task in tasks:

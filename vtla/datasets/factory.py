@@ -49,9 +49,9 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        # action_episode_ee carries the EE action and must be chunked over the same horizon as
-        # `action` (it is not literally the "action" key, so handle it explicitly).
-        if key in (ACTION, ACTION + "_episode_ee") and cfg.action_delta_indices is not None:
+        # action_episode_ee / action_absolute_ee carry the EE action and must be chunked over the
+        # same horizon as `action` (they are not literally the "action" key, so handle explicitly).
+        if key in (ACTION, ACTION + "_episode_ee", ACTION + "_absolute_ee") and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]

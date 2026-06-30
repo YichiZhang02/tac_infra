@@ -242,18 +242,23 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     active_cfg = cfg.trainable_config
     processor_pretrained_path = active_cfg.pretrained_path
-    # EE modes (episode_ee / relative_ee) and joint relative actions change the processor's feature
-    # dims and steps, so the pretrained checkpoint's processor must NOT be reused — rebuild it from
-    # the current policy config (with the EE stats remap + pose relative/absolute steps).
+    # EE modes (episode_ee / absolute_ee / relative_ee) and joint relative actions change the
+    # processor's feature dims and steps, so the pretrained/checkpoint processor must NOT be reused —
+    # rebuild it from the current policy config (with the EE stats remap + pose relative/absolute
+    # steps). This applies when resuming too: loading the saved processor would additionally prepend
+    # the inference-only EpisodeEEPreprocessorStep (joints->EE FK, needs the robot SDK), which is
+    # wrong for training where the dataset already supplies the EE columns. Model weights / optimizer
+    # / scheduler / step are restored from the checkpoint independently of the processor.
     _needs_rebuilt_processor = (
         getattr(active_cfg, "use_relative_actions", False)
-        or getattr(active_cfg, "state_mode", "joint") == "episode_ee"
+        or getattr(active_cfg, "state_mode", "joint") in ("episode_ee", "absolute_ee")
         or getattr(active_cfg, "action_mode", "joint") == "relative_ee"
     )
-    if _needs_rebuilt_processor and processor_pretrained_path is not None and not cfg.resume:
+    if _needs_rebuilt_processor and processor_pretrained_path is not None:
         logging.warning(
-            "Relative/EE action or episode_ee state mode is set: building processors from the current "
-            "policy config instead of the pretrained checkpoint (whose processor has different dims/steps)."
+            "Relative/EE action or EE state mode is set: building processors from the current policy "
+            "config instead of the pretrained/checkpoint processor (different dims/steps; avoids the "
+            "inference-only EE preprocessing step during training)."
         )
         processor_pretrained_path = None
 

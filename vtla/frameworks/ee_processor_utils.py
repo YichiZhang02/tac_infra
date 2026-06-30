@@ -25,27 +25,31 @@ to those canonical keys and (b) build the pose-aware relative/absolute steps.
 from vtla.engine.processor import AbsoluteActionsProcessorStep, RelativeActionsProcessorStep
 from vtla.engine.utils.constants import ACTION, OBS_STATE
 
-from .sensor_routing import ACTION_RELATIVE_EE, OBS_STATE_EPISODE_EE
+from .sensor_routing import ACTION_RELATIVE_EE, OBS_STATE_ABSOLUTE_EE, OBS_STATE_EPISODE_EE
 
 
 def remap_ee_dataset_stats(dataset_stats, config):
     """Return ``dataset_stats`` with EE stats placed under the canonical keys (shallow copy).
 
-    - state_mode='episode_ee':  observation.state  <- observation.state_episode_ee stats
-    - action_mode='relative_ee': action            <- action_relative_ee stats (relative St^-1·S_{t+k})
+    - state_mode='episode_ee':   observation.state  <- observation.state_episode_ee stats
+    - state_mode='absolute_ee':  observation.state  <- observation.state_absolute_ee stats
+    - action_mode='relative_ee': action             <- action_relative_ee stats (St^-1·S_{t+k}),
+      reused for both EE state modes since the relative target is anchor-independent.
 
     A no-op (returns the input) for joint modes.
     """
     if dataset_stats is None:
         return dataset_stats
-    state_ee = getattr(config, "state_mode", "joint") == "episode_ee"
+    state_mode = getattr(config, "state_mode", "joint")
+    state_ee = state_mode in ("episode_ee", "absolute_ee")
     action_ee = getattr(config, "action_mode", "joint") == "relative_ee"
     if not (state_ee or action_ee):
         return dataset_stats
 
     dataset_stats = dict(dataset_stats)
-    if state_ee and OBS_STATE_EPISODE_EE in dataset_stats:
-        dataset_stats[OBS_STATE] = dataset_stats[OBS_STATE_EPISODE_EE]
+    state_key = OBS_STATE_ABSOLUTE_EE if state_mode == "absolute_ee" else OBS_STATE_EPISODE_EE
+    if state_ee and state_key in dataset_stats:
+        dataset_stats[OBS_STATE] = dataset_stats[state_key]
     if action_ee:
         if ACTION_RELATIVE_EE not in dataset_stats:
             raise KeyError(

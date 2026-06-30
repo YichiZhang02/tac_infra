@@ -26,24 +26,34 @@ from vtla.engine.utils.ee_transforms import ee_to_absolute, ee_to_relative
 
 OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"
 ACTION_EPISODE_EE = ACTION + "_episode_ee"
+OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"
+ACTION_ABSOLUTE_EE = ACTION + "_absolute_ee"
 
 
 def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
     """Select EE columns as the canonical ``observation.state`` / ``action`` (in place).
 
     The dataset carries both joint and EE columns; ``state_mode`` / ``action_mode`` pick which the
-    model consumes. Done at the batch level (before the processor) because ``action_episode_ee`` is
-    not the literal ``action`` key and would otherwise be dropped by ``batch_to_transition``.
+    model consumes. Done at the batch level (before the processor) because the EE columns are not the
+    literal ``action`` key and would otherwise be dropped by ``batch_to_transition``. The action EE
+    column is chosen to match ``state_mode`` (episode→``action_episode_ee``, absolute→
+    ``action_absolute_ee``); the relative training target is anchor-independent so either matches.
     Mutates and returns ``batch``.
     """
-    if state_mode == "episode_ee" and OBS_STATE_EPISODE_EE in batch:
-        batch[OBS_STATE] = batch.pop(OBS_STATE_EPISODE_EE)
-        if OBS_STATE_EPISODE_EE + "_is_pad" in batch:
-            batch[OBS_STATE + "_is_pad"] = batch.pop(OBS_STATE_EPISODE_EE + "_is_pad")
-    if action_mode == "relative_ee" and ACTION_EPISODE_EE in batch:
-        batch[ACTION] = batch.pop(ACTION_EPISODE_EE)
-        if ACTION_EPISODE_EE + "_is_pad" in batch:
-            batch[ACTION + "_is_pad"] = batch.pop(ACTION_EPISODE_EE + "_is_pad")
+
+    def _route(dst: str, src: str) -> None:
+        if src in batch:
+            batch[dst] = batch.pop(src)
+            if src + "_is_pad" in batch:
+                batch[dst + "_is_pad"] = batch.pop(src + "_is_pad")
+
+    if state_mode == "episode_ee":
+        _route(OBS_STATE, OBS_STATE_EPISODE_EE)
+    elif state_mode == "absolute_ee":
+        _route(OBS_STATE, OBS_STATE_ABSOLUTE_EE)
+    if action_mode == "relative_ee":
+        src = ACTION_ABSOLUTE_EE if state_mode == "absolute_ee" else ACTION_EPISODE_EE
+        _route(ACTION, src)
     return batch
 
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep

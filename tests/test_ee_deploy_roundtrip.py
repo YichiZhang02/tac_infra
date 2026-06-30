@@ -199,9 +199,58 @@ def test_deploy_classes():
     print("  ✓ robot _send_action_ee rot6d->matrix->quat round-trips (flange pose preserved)")
 
 
+def test_absolute_deploy_classes():
+    """state_mode='absolute_ee' chain through the real classes (no A0, no world step):
+
+      EpisodeEEPreprocessorStep(relative_to_baseline=False): joints -> T_t (base-frame, model input)
+      AbsoluteActionsProcessorStep equivalent: a_rel -> T_{t+k}  (already world-frame, no lift)
+
+    Proves that with the absolute encoding the relative step's cached anchor IS the world pose T_t,
+    so ee_to_absolute(T_t, a_rel) == T_{t+k} is directly the world flange pose — no A0 cache and no
+    EpisodeEEToWorldStep needed.
+    """
+    import pyarrow.parquet as pq
+
+    from vtla.frameworks.episode_ee_processor import EpisodeEEPreprocessorStep
+
+    ds = ROOT / "playground/data/rm_umi_dual_pen_open"
+    df = pq.read_table(ds / "data/chunk-000/file-000.parquet",
+                       columns=["observation.state", "episode_index"]).to_pandas()
+    names = __import__("json").load(open(ds / "meta/info.json"))["features"]["observation.state"]["names"]
+    jidx = {"rj": [names.index(f"right_main_joint{i}") for i in range(1, 8)],
+            "lj": [names.index(f"left_main_joint{i}") for i in range(1, 8)],
+            "rg": names.index("right_main_gripper"), "lg": names.index("left_main_gripper")}
+    ep0 = df[df["episode_index"] == 0].reset_index(drop=True)
+    j = np.stack(ep0["observation.state"].to_numpy()).astype(np.float64)
+    t, k = 50, 8
+
+    # --- preprocessor in absolute mode: no baseline, raw base-frame FK ---
+    ee = EpisodeEEPreprocessorStep(state_feature_names=names, relative_to_baseline=False)
+    ee.reset()
+    Tt = ee.observation({OBS_STATE: torch.tensor(j[t])})[OBS_STATE].unsqueeze(0).double()  # (1,20)
+    assert ee.get_baseline_ee() is None, "absolute_ee must NOT cache A0"
+
+    # T_t equals the world FK directly (Tt = FK(joints), no T0)
+    Tt_gt = torch.tensor(world_packed(j[t], jidx)).unsqueeze(0)
+    pose_dims = [i for i in range(20) if i not in (9, 19)]
+    tt_err = (Tt[0, pose_dims] - Tt_gt[0, pose_dims]).abs().max().item()
+    assert tt_err < 1e-4, f"absolute T_t mismatch vs world FK: {tt_err}"
+    print(f"  ✓ EpisodeEEPreprocessorStep(absolute) state == world FK(joints), no T0: max err {tt_err:.2e}")
+
+    # train target a_rel = ee_to_relative(T_t, T_{t+k}); decode straight to world (no A0 lift)
+    Ttk_gt = torch.tensor(world_packed(j[t + k], jidx)).unsqueeze(0)
+    a_rel = ee_to_relative(Tt, Ttk_gt)
+    Ttk_rec = ee_to_absolute(Tt, a_rel)  # AbsoluteActionsProcessorStep equivalent -> world frame
+    w_err = (Ttk_rec[0, pose_dims] - Ttk_gt[0, pose_dims]).abs().max().item()
+    assert w_err < 1e-4, f"absolute decode world pose mismatch: {w_err}"
+    print(f"  ✓ ee_to_absolute(T_t, a_rel) == T_t+k world pose directly (no A0): max err {w_err:.2e}")
+
+
 if __name__ == "__main__":
     print("EE deployment round-trip proof:")
     main()
     print("EE deployment class-wiring proof:")
     test_deploy_classes()
+    print("absolute_ee deployment class-wiring proof:")
+    test_absolute_deploy_classes()
     print("ALL PASSED ✅")

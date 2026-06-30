@@ -232,23 +232,30 @@ def make_pre_post_processors(
         )
         _reconnect_relative_absolute_steps(preprocessor, postprocessor)
 
-        # For state_mode='episode_ee' at inference time the dataset does not supply
-        # observation.state_episode_ee; prepend a step that converts joint angles to
-        # episode-relative EE pose on-the-fly so the model receives the right input.
-        if getattr(policy_cfg, "state_mode", None) == "episode_ee":
-            from vtla.engine.processor import EpisodeEEToWorldStep
-
+        # For EE state modes at inference the dataset does not supply the pre-computed EE column;
+        # prepend a step that converts joint angles to the EE pose on-the-fly so the model receives
+        # the right input. episode_ee -> pose relative to the episode first frame; absolute_ee ->
+        # raw base-frame FK (no baseline).
+        state_mode = getattr(policy_cfg, "state_mode", None)
+        if state_mode in ("episode_ee", "absolute_ee"):
             from .episode_ee_processor import EpisodeEEPreprocessorStep
 
             state_names = getattr(policy_cfg, "state_feature_names", None) or []
-            ee_step = EpisodeEEPreprocessorStep(state_feature_names=state_names)
+            relative = state_mode == "episode_ee"
+            ee_step = EpisodeEEPreprocessorStep(
+                state_feature_names=state_names,
+                relative_to_baseline=relative,
+            )
             preprocessor.steps = [ee_step, *preprocessor.steps]
 
-            # For action_mode='relative_ee' the postprocessor (AbsoluteActionsProcessorStep) only
-            # recovers the action relative to the episode first frame (S_{t+k}). Append a step that
-            # lifts it to the world frame (A_{t+k} = A0 · S_{t+k}) using A0 cached by ee_step, so
-            # the robot receives an absolute world EE pose to execute.
-            if getattr(policy_cfg, "action_mode", None) == "relative_ee":
+            # episode_ee + action_mode='relative_ee': the postprocessor (AbsoluteActionsProcessorStep)
+            # only recovers the action relative to the episode first frame (S_{t+k}). Append a step
+            # that lifts it to the world frame (A_{t+k} = A0 · S_{t+k}) using A0 cached by ee_step.
+            # absolute_ee needs NO such lift: the relative step's cached anchor is the absolute pose
+            # Tt, so ee_to_absolute(Tt, a_rel) = T_{t+k} is already the world flange pose.
+            if relative and getattr(policy_cfg, "action_mode", None) == "relative_ee":
+                from vtla.engine.processor import EpisodeEEToWorldStep
+
                 world_step = EpisodeEEToWorldStep(
                     n_arms=getattr(policy_cfg, "ee_num_arms", 2),
                     ee_step=ee_step,
@@ -341,23 +348,27 @@ def make_policy(
     kwargs = {}
     features = dataset_to_policy_features(ds_meta.features)
 
+    # Build input/output features from the dataset meta. Visual (camera) features ALWAYS come from
+    # the dataset so the configured camera keys match what the data loader actually provides, and so
+    # the EE action columns (action_episode_ee / action_absolute_ee) survive for apply_action_mode.
+    cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+    if not cfg.input_features:
+        cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+
     if cfg.pretrained_path:
-        # When loading a pretrained checkpoint the saved config already has input/output
-        # features routed and shaped for the trained architecture (e.g. 20-dim EE instead
-        # of 16-dim joints for episode_ee mode). Using ds_meta shapes here would construct
-        # the wrong model and cause weight loading errors. Load the checkpoint config once
-        # to recover the correct feature descriptors.
+        # A pretrained checkpoint may have been trained with a different proprioceptive (STATE) dim
+        # than the raw dataset (e.g. OpenPI's 32-dim padded state, or a 20-dim EE state). Pull only
+        # the NON-VISUAL feature shapes from the ckpt config so the model is built to match the
+        # checkpoint weights. Visual features are deliberately NOT taken from the ckpt: its camera
+        # names may differ (e.g. OpenPI 'base_0_rgb' vs this dataset's 'left_cam_wrist'), and
+        # overwriting them would prune every dataset camera (the bug that broke pi05 fine-tuning).
+        # For EE state modes apply_state_mode then re-routes observation.state to the dataset's
+        # 20-dim EE column anyway, so this only matters for joint/none modes.
         from vtla.engine.configs.policies import PreTrainedConfig as _BaseCfg  # noqa: PLC0415
         _ckpt_cfg = _BaseCfg.from_pretrained(cfg.pretrained_path)
-        if not cfg.input_features:
-            cfg.input_features = _ckpt_cfg.input_features or {}
-        cfg.output_features = _ckpt_cfg.output_features or {
-            key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION
-        }
-    else:
-        cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-        if not cfg.input_features:
-            cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+        for key, ft in (_ckpt_cfg.input_features or {}).items():
+            if ft.type is not FeatureType.VISUAL:
+                cfg.input_features[key] = ft
 
     # Store action feature names for relative_exclude_joints support
     if ds_meta is not None and hasattr(cfg, "action_feature_names"):

@@ -17,7 +17,7 @@
 """Offline: add EE-pose columns to a joint LeRobot v3.0 dataset (in place).
 
 Reads the joint ``observation.state`` / ``action`` (16-dim, dual-arm) and, via Realman forward
-kinematics, ADDS two columns to the SAME dataset (joint columns are left untouched, so joint-mode
+kinematics, ADDS four columns to the SAME dataset (joint columns are left untouched, so joint-mode
 training is unaffected):
 
     observation.state_episode_ee : 20-dim, EE pose of the STATE joints relative to each episode's
@@ -25,6 +25,14 @@ training is unaffected):
     action_episode_ee            : 20-dim, IDENTICAL to observation.state_episode_ee (the state's own
                                    trajectory). Kept as a separate column so it can carry the action
                                    horizon (delta_indices) independently of the state window.
+    observation.state_absolute_ee: 20-dim, EE pose of the STATE joints in the robot base frame (Tt,
+                                   NO T0 subtraction) — keeps absolute workspace position.
+    action_absolute_ee           : 20-dim, IDENTICAL to observation.state_absolute_ee (separate column
+                                   only so it can carry the action horizon independently).
+
+``action_relative_ee`` stats (the relativized target the model trains on) are anchor-independent
+(T0 cancels in St^-1·S_{t+k}), so they are computed once and reused by both episode_ee and
+absolute_ee state modes.
 
 Both use per arm ``[xyz(3), rot6d(6), gripper(1)]`` (rot6d = first two columns of the rotation
 matrix), ordered RIGHT arm first then LEFT (20 = 2 * 10). Gripper is kept absolute.
@@ -78,7 +86,12 @@ PER_ARM_DIM = 10
 EE_DIM = 20
 DOF = 7
 STAT_KEYS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
-NEW_FEATURES = ("observation.state_episode_ee", "action_episode_ee")
+NEW_FEATURES = (
+    "observation.state_episode_ee",
+    "action_episode_ee",
+    "observation.state_absolute_ee",
+    "action_absolute_ee",
+)
 
 
 # ----------------------------------------------------------------------------
@@ -159,6 +172,19 @@ def to_episode_ee(algo: Algo, vec16: np.ndarray, jidx: dict, baseline) -> np.nda
     (Rp0, RR0), (Lp0, LR0) = baseline
     return np.concatenate(
         [relative_arm_ee(rp, rm, rg, Rp0, RR0), relative_arm_ee(lp, lm, lg, Lp0, LR0)]
+    ).astype(np.float32)
+
+
+def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
+    """Pose in the robot base frame (Tt, no T0): pos/rot6d absolute, gripper absolute."""
+    return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
+
+
+def to_absolute_ee(algo: Algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
+    """16-dim joints -> 20-dim base-frame EE (right then left), NO episode baseline (one step less)."""
+    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
+    return np.concatenate(
+        [absolute_arm_ee(rp, rm, rg), absolute_arm_ee(lp, lm, lg)]
     ).astype(np.float32)
 
 
@@ -267,6 +293,7 @@ def main():
 
     # accumulate global + per-episode stats
     all_state, all_action = [], []
+    all_state_abs, all_action_abs = [], []
     per_ep: dict[int, dict[str, list]] = {}
 
     print("[2/4] converting data parquet (adding columns)")
@@ -277,6 +304,8 @@ def main():
         state_col = df["observation.state"].to_numpy()
         st_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
         ac_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
+        st_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
+        ac_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
@@ -285,11 +314,19 @@ def main():
             # so action_episode_ee is identical per-frame to state_episode_ee (separate column only
             # so it can carry the action horizon independently).
             ac_ee[i] = st_ee[i]
-            per_ep.setdefault(ep, {"s": [], "a": []})
+            # absolute_ee: base-frame FK with NO T0 subtraction. The relative training target
+            # St^-1·S_{t+k} is anchor-independent, so action_absolute_ee mirrors state_absolute_ee.
+            st_abs[i] = to_absolute_ee(algo, state_col[i], jidx)
+            ac_abs[i] = st_abs[i]
+            per_ep.setdefault(ep, {"s": [], "a": [], "s_abs": [], "a_abs": []})
             per_ep[ep]["s"].append(st_ee[i])
             per_ep[ep]["a"].append(ac_ee[i])
+            per_ep[ep]["s_abs"].append(st_abs[i])
+            per_ep[ep]["a_abs"].append(ac_abs[i])
         all_state.append(st_ee)
         all_action.append(ac_ee)
+        all_state_abs.append(st_abs)
+        all_action_abs.append(ac_abs)
 
         # drop pre-existing new columns (idempotent re-run), then append fresh
         for col in NEW_FEATURES:
@@ -297,6 +334,8 @@ def main():
                 tab = tab.drop([col])
         tab = tab.append_column("observation.state_episode_ee", _fsl_f32(st_ee))
         tab = tab.append_column("action_episode_ee", _fsl_f32(ac_ee))
+        tab = tab.append_column("observation.state_absolute_ee", _fsl_f32(st_abs))
+        tab = tab.append_column("action_absolute_ee", _fsl_f32(ac_abs))
         pq.write_table(tab, f)
         print(f"      {f.relative_to(root)}  ({len(df)} frames)")
 
@@ -315,6 +354,10 @@ def main():
     stat_sources = (
         ("observation.state_episode_ee", feature_stats(np.concatenate(all_state))),
         ("action_episode_ee", feature_stats(np.concatenate(all_action))),
+        ("observation.state_absolute_ee", feature_stats(np.concatenate(all_state_abs))),
+        ("action_absolute_ee", feature_stats(np.concatenate(all_action_abs))),
+        # action_relative_ee is anchor-independent (St^-1·S_{t+k} cancels T0), so the episode_ee
+        # relative stats are reused unchanged for state_mode='absolute_ee' too.
         ("action_relative_ee", rel_stats),
     )
     for feat, st in stat_sources:
@@ -327,7 +370,9 @@ def main():
     # ---- meta/episodes/*.parquet (per-episode stats) ----
     print("[4/4] meta/episodes per-episode stats")
     ep_stats = {ep: {"observation.state_episode_ee": feature_stats(np.stack(d["s"])),
-                     "action_episode_ee": feature_stats(np.stack(d["a"]))}
+                     "action_episode_ee": feature_stats(np.stack(d["a"])),
+                     "observation.state_absolute_ee": feature_stats(np.stack(d["s_abs"])),
+                     "action_absolute_ee": feature_stats(np.stack(d["a_abs"]))}
                 for ep, d in per_ep.items()}
     ep_files = sorted(glob.glob(str(root / "meta" / "episodes" / "**" / "*.parquet"), recursive=True))
     for ef in ep_files:

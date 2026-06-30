@@ -35,8 +35,9 @@ from vtla.engine.configs import FeatureType, PolicyFeature
 from vtla.engine.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 VALID_TACTILE_MODES = ("none", "as_image", "encode")
-# joint = joint angles; episode_ee = end-effector pose relative to each episode's FIRST frame.
-VALID_STATE_MODES = ("none", "joint", "episode_ee")
+# joint = joint angles; episode_ee = EE pose relative to each episode's FIRST frame (T0^-1·Tt);
+# absolute_ee = EE pose in the robot base frame (Tt, no T0) — keeps absolute workspace position.
+VALID_STATE_MODES = ("none", "joint", "episode_ee", "absolute_ee")
 # joint = joint targets; relative_ee = EE pose relative to the CURRENT observation (delta).
 VALID_ACTION_MODES = ("joint", "relative_ee")
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
@@ -45,6 +46,8 @@ VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
 # Dataset columns / stats keys added offline by tools/convert_joints_to_eepose.py.
 OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"  # observation.state_episode_ee
 ACTION_EPISODE_EE = ACTION + "_episode_ee"  # action_episode_ee (per-frame absolute-in-episode)
+OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"  # observation.state_absolute_ee (base-frame Tt)
+ACTION_ABSOLUTE_EE = ACTION + "_absolute_ee"  # action_absolute_ee (per-frame base-frame copy)
 ACTION_RELATIVE_EE = ACTION + "_relative_ee"  # stats-only key: relative action St^-1·S_{t+k}
 
 
@@ -199,10 +202,11 @@ class SensorRoutingMixin:
             raise ValueError(f"Invalid state_mode '{self.state_mode}'. Expected one of {VALID_STATE_MODES}.")
         if self.action_mode not in VALID_ACTION_MODES:
             raise ValueError(f"Invalid action_mode '{self.action_mode}'. Expected one of {VALID_ACTION_MODES}.")
-        if self.action_mode == "relative_ee" and self.state_mode != "episode_ee":
+        if self.action_mode == "relative_ee" and self.state_mode not in ("episode_ee", "absolute_ee"):
             raise ValueError(
-                "action_mode='relative_ee' requires state_mode='episode_ee': the relative action is "
-                "computed against observation.state_episode_ee (the current EE observation)."
+                "action_mode='relative_ee' requires state_mode in {'episode_ee', 'absolute_ee'}: the "
+                "relative action is computed against the current EE observation (the relative target "
+                "St^-1·S_{t+k} is anchor-independent, so either EE state encoding works)."
             )
         if self.tactile_encoder_type not in VALID_TACTILE_ENCODERS:
             raise ValueError(
@@ -263,61 +267,73 @@ class SensorRoutingMixin:
     def apply_state_mode(self, padded_state_dim: int | None = None) -> None:
         """Route the proprioceptive state according to ``state_mode``.
 
-        The dataset carries BOTH ``observation.state`` (joint) and
-        ``observation.state_episode_ee`` (EE). This selects one as the canonical
-        ``observation.state`` the model consumes and drops the unselected variant.
+        The dataset carries the joint ``observation.state`` plus the EE variants
+        ``observation.state_episode_ee`` / ``observation.state_absolute_ee``. This selects one
+        as the canonical ``observation.state`` the model consumes and drops the unselected ones.
 
-        - ``none``: remove ``observation.state`` (both variants).
-        - ``joint``: keep joint ``observation.state``, drop the EE variant; if
+        - ``none``: remove ``observation.state`` (all variants).
+        - ``joint``: keep joint ``observation.state``, drop the EE variants; if
                      ``padded_state_dim`` is given and state is missing, materialise a
                      padded state feature (pi05-style).
-        - ``episode_ee``: use ``observation.state_episode_ee`` as ``observation.state``,
-                          drop the joint variant.
+        - ``episode_ee``: use ``observation.state_episode_ee`` as ``observation.state``.
+        - ``absolute_ee``: use ``observation.state_absolute_ee`` as ``observation.state``.
         """
         if self.state_mode == "none":
             self.input_features.pop(OBS_STATE, None)
             self.input_features.pop(OBS_STATE_EPISODE_EE, None)
+            self.input_features.pop(OBS_STATE_ABSOLUTE_EE, None)
         elif self.state_mode == "joint":
             self.input_features.pop(OBS_STATE_EPISODE_EE, None)
+            self.input_features.pop(OBS_STATE_ABSOLUTE_EE, None)
             if padded_state_dim is not None and OBS_STATE not in self.input_features:
                 self.input_features[OBS_STATE] = PolicyFeature(
                     type=FeatureType.STATE, shape=(padded_state_dim,)
                 )
-        elif self.state_mode == "episode_ee":
-            ee_ft = self.input_features.pop(OBS_STATE_EPISODE_EE, None)
+        elif self.state_mode in ("episode_ee", "absolute_ee"):
+            ee_key = OBS_STATE_ABSOLUTE_EE if self.state_mode == "absolute_ee" else OBS_STATE_EPISODE_EE
+            other_key = OBS_STATE_EPISODE_EE if self.state_mode == "absolute_ee" else OBS_STATE_ABSOLUTE_EE
+            self.input_features.pop(other_key, None)
+            ee_ft = self.input_features.pop(ee_key, None)
             if ee_ft is not None:
                 # Dataset has the pre-computed column; rename it to canonical OBS_STATE.
                 self.input_features.pop(OBS_STATE, None)
                 self.input_features[OBS_STATE] = ee_ft
             elif OBS_STATE not in self.input_features:
                 raise ValueError(
-                    f"state_mode='episode_ee' requires either '{OBS_STATE_EPISODE_EE}' in the dataset "
+                    f"state_mode='{self.state_mode}' requires either '{ee_key}' in the dataset "
                     "(run tools/convert_joints_to_eepose.py for offline datasets) or "
                     f"'{OBS_STATE}' for real-time inference (an EpisodeEEPreprocessorStep converts "
                     "joint angles to EE pose at runtime)."
                 )
-            # else: OBS_STATE present but state_episode_ee absent → inference mode.
+            # else: OBS_STATE present but the EE column absent → inference mode.
             # EpisodeEEPreprocessorStep converts observation.state joints → EE pose before the model.
 
     def apply_action_mode(self) -> None:
         """Route the action according to ``action_mode`` (mirrors :meth:`apply_state_mode`).
 
-        The dataset carries BOTH ``action`` (joint) and ``action_episode_ee`` (EE). This
-        selects one as the canonical ``action`` output and drops the unselected variant.
+        The dataset carries the joint ``action`` plus the EE variants ``action_episode_ee`` /
+        ``action_absolute_ee``. This selects one as the canonical ``action`` output and drops the
+        unselected variants. For ``relative_ee`` the EE variant is chosen to match ``state_mode``
+        (episode→``action_episode_ee``, absolute→``action_absolute_ee``); the relative target is
+        anchor-independent so either yields the same trained action.
         """
         if self.output_features is None:
             return
         if self.action_mode == "joint":
             self.output_features.pop(ACTION_EPISODE_EE, None)
+            self.output_features.pop(ACTION_ABSOLUTE_EE, None)
         elif self.action_mode == "relative_ee":
-            ee_ft = self.output_features.pop(ACTION_EPISODE_EE, None)
+            ee_key = ACTION_ABSOLUTE_EE if self.state_mode == "absolute_ee" else ACTION_EPISODE_EE
+            other_key = ACTION_EPISODE_EE if self.state_mode == "absolute_ee" else ACTION_ABSOLUTE_EE
+            self.output_features.pop(other_key, None)
+            ee_ft = self.output_features.pop(ee_key, None)
             if ee_ft is not None:
                 self.output_features.pop(ACTION, None)
                 self.output_features[ACTION] = ee_ft
             elif ACTION not in self.output_features:
                 raise ValueError(
-                    f"action_mode='relative_ee' requires '{ACTION_EPISODE_EE}' in the dataset. "
-                    "Run tools/convert_joints_to_eepose.py first."
+                    f"action_mode='relative_ee' (state_mode='{self.state_mode}') requires '{ee_key}' "
+                    "in the dataset. Run tools/convert_joints_to_eepose.py first."
                 )
 
     def add_empty_cameras(self, num: int, image_resolution: tuple[int, int]) -> list[str]:

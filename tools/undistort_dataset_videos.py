@@ -22,6 +22,15 @@ Per-channel image stats in meta/stats.json are kept as-is: an undistort + center
 geometric warp that preserves per-channel mean/std to well within training tolerance (the same
 rationale by which downscale_dataset_videos.py keeps stats across a resize).
 
+Speed: the work per wrist frame is decode -> colour-convert -> fisheye remap -> re-encode, all
+CPU-bound. `--gpu-decode auto` (default) offloads the H.264/HEVC/AV1 *decode* to NVDEC (cuvid)
+and downloads NV12 (half the bytes of BGR), converting to BGR with cv2 — this frees CPU cores
+under parallel `--jobs`. Encode stays on libx264 and remap stays on cv2: the A100 has no NVENC
+unit, and remap needs a CUDA-enabled OpenCV build we don't assume. NVDEC decode is only used when
+the source resolution equals the calibration resolution (no resize needed); other files fall back
+to CPU automatically. The NV12->BGR path differs from the CPU swscale path by ~1 grey level (well
+under codec noise); pass `--gpu-decode off` for byte-for-byte parity with older CPU-only runs.
+
 Calibration JSON (Kalibr/OpenCV fisheye, e.g. tools/calib/x5_left_intrinsics.json):
     {
         "distortion_model": "equidistant",
@@ -68,6 +77,19 @@ _CODEC_TAG = {
     "hevc_nvenc": "hevc",
 }
 
+# Source codec (as ffprobe reports it) -> NVDEC (cuvid) decoder for GPU-offloaded decode.
+# Only decode is GPU-offloaded: the A100 has no NVENC unit, and the fisheye remap needs a
+# CUDA-enabled OpenCV build (not assumed), so color-convert + remap + encode stay on CPU.
+_CUVID = {
+    "h264": "h264_cuvid",
+    "hevc": "hevc_cuvid",
+    "av1": "av1_cuvid",
+    "vp9": "vp9_cuvid",
+    "vp8": "vp8_cuvid",
+    "mpeg4": "mpeg4_cuvid",
+    "mpeg2video": "mpeg2_cuvid",
+}
+
 # Wrist cameras undistorted by default -> bundled intrinsics. Everything else is copied verbatim.
 DEFAULT_CALIB = {
     "observation.images.left_cam_wrist": HERE / "calib" / "x5_left_intrinsics.json",
@@ -112,33 +134,78 @@ def _read_first_frame(path: str, in_size: tuple[int, int]) -> np.ndarray:
     return np.frombuffer(raw, np.uint8).reshape(in_h, in_w, 3).copy()
 
 
-def _probe_fps(path: str) -> float:
+def _probe_stream(path: str) -> tuple[float, str, int, int]:
+    """Return (fps, codec_name, width, height) of the first video stream."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=r_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1", path],
+         "-show_entries", "stream=r_frame_rate,codec_name,width,height",
+         "-of", "default=nokey=1:noprint_wrappers=1", path],
         check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    if "/" in out:
-        n, d = out.split("/")
-        return float(n) / float(d) if float(d) else 30.0
-    return float(out or 30.0)
+    ).stdout.split()
+    # ffprobe prints the entries in the order requested: codec_name width height r_frame_rate.
+    codec, w, h, rate = (out + ["", "0", "0", "30"])[:4]
+    if "/" in rate:
+        n, d = rate.split("/")
+        fps = float(n) / float(d) if float(d) else 30.0
+    else:
+        fps = float(rate or 30.0)
+    return fps, codec, int(w or 0), int(h or 0)
+
+
+def _nvdec_functional(sample_src: str, dec_name: str) -> bool:
+    """One-shot check that NVDEC can actually decode this codec on this box (A100 has no NVENC
+    but does have NVDEC; a build listing the decoder does not guarantee a capable device)."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+             "-c:v", dec_name, "-i", sample_src, "-map", "0:v:0", "-frames:v", "1",
+             "-f", "null", "-"],
+            capture_output=True,
+        )
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _undistort_encode(args: tuple) -> tuple[str, bool, str]:
-    """Undistort + center-crop one video into dst. Returns (src_path, ok, message)."""
-    (src, dst, K_list, D_list, in_size, crop, gop, crf, codec, scale_flags) = args
+    """Undistort + center-crop one video into dst. Returns (src_path, ok, message).
+
+    gpu_decode offloads the H.264/HEVC/AV1 decode to NVDEC (cuvid) and downloads frames as NV12
+    (half the bytes of BGR); the colour-convert (cv2), fisheye remap (cv2) and encode (libx264)
+    stay on CPU. Only used when the source resolution equals the calibration resolution (so no
+    resize is needed) and the codec has an NVDEC decoder; otherwise this file falls back to the
+    CPU decode path transparently.
+    """
+    (src, dst, K_list, D_list, in_size, crop, gop, crf, codec, scale_flags, gpu_decode) = args
     in_w, in_h = in_size
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     try:
         map1, map2 = _build_maps(K_list, D_list, in_size)
-        fps = _probe_fps(src)
-        # Decode to raw BGR at the calibrated resolution (scale if source differs, so maps line up).
-        dec = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-i", src, "-map", "0:v:0",
-             "-vf", f"scale={in_w}:{in_h}:flags={scale_flags}",
-             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-            stdout=subprocess.PIPE,
-        )
+        # Crop the maps to the output window so remap produces the crop x crop frame directly
+        # (no full-frame warp of pixels we discard). Pixel-identical to remap-then-center-crop.
+        x0, y0 = (in_w - crop) // 2, (in_h - crop) // 2
+        map1 = np.ascontiguousarray(map1[y0:y0 + crop, x0:x0 + crop])
+        map2 = np.ascontiguousarray(map2[y0:y0 + crop, x0:x0 + crop])
+        fps, src_codec, src_w, src_h = _probe_stream(src)
+        # NVDEC path only when no resize is needed (maps are computed at the calibration
+        # resolution) and the codec is NVDEC-decodable.
+        use_gpu = (gpu_decode and (src_w, src_h) == (in_w, in_h) and src_codec in _CUVID)
+        if use_gpu:
+            dec = subprocess.Popen(
+                ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                 "-c:v", _CUVID[src_codec], "-i", src, "-map", "0:v:0",
+                 "-vf", "hwdownload,format=nv12", "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
+                stdout=subprocess.PIPE,
+            )
+            frame_bytes = in_w * in_h * 3 // 2  # NV12 = 1.5 bytes/pixel
+        else:
+            dec = subprocess.Popen(
+                ["ffmpeg", "-v", "error", "-i", src, "-map", "0:v:0",
+                 "-vf", f"scale={in_w}:{in_h}:flags={scale_flags}",
+                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                stdout=subprocess.PIPE,
+            )
+            frame_bytes = in_w * in_h * 3
         enc = subprocess.Popen(
             ["ffmpeg", "-y", "-v", "error",
              "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop}x{crop}", "-r", f"{fps}",
@@ -146,15 +213,17 @@ def _undistort_encode(args: tuple) -> tuple[str, bool, str]:
              "-pix_fmt", "yuv420p", "-an", "-vsync", "0", dst],
             stdin=subprocess.PIPE,
         )
-        frame_bytes = in_w * in_h * 3
         while True:
             raw = dec.stdout.read(frame_bytes)
             if len(raw) != frame_bytes:
                 break
-            frame = np.frombuffer(raw, np.uint8).reshape(in_h, in_w, 3)
-            und = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR,
+            if use_gpu:
+                yuv = np.frombuffer(raw, np.uint8).reshape(in_h * 3 // 2, in_w)
+                frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV12)
+            else:
+                frame = np.frombuffer(raw, np.uint8).reshape(in_h, in_w, 3)
+            out = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR,
                             borderMode=cv2.BORDER_CONSTANT)
-            out = _center_crop(und, crop)
             enc.stdin.write(np.ascontiguousarray(out).tobytes())
         dec.stdout.close()
         dec.wait()
@@ -179,11 +248,13 @@ def _copy_verbatim(args: tuple[str, str]) -> tuple[str, bool, str]:
 
 
 def _frame_count(path: Path) -> int | None:
-    """Exact frame count via ffprobe (-count_frames). Returns None on failure."""
+    """Video frame count via ffprobe. Uses -count_packets (demux only, no decode): for these CFR
+    videos the packet count equals the frame count, and it is ~500x faster than -count_frames,
+    which decodes every frame single-threaded (minutes per HEVC file). Returns None on failure."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-count_frames", "-show_entries", "stream=nb_read_frames",
+             "-count_packets", "-show_entries", "stream=nb_read_packets",
              "-of", "default=nokey=1:noprint_wrappers=1", str(path)],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
@@ -274,7 +345,7 @@ def run_test(src: Path, calib_map: dict[str, str], crop: int) -> int:
         cv2.imwrite(str(out_dir / f"{tag}_1_undistorted_cropbox.png"), box)
         cv2.imwrite(str(out_dir / f"{tag}_2_final_{crop}x{crop}.png"), _center_crop(und, crop))
         clip = out_dir / f"{tag}_clip_{crop}x{crop}.mp4"
-        _undistort_encode((str(vids[0]), str(clip), K, D, (W, H), crop, 4, 18, "libx264", "lanczos"))
+        _undistort_encode((str(vids[0]), str(clip), K, D, (W, H), crop, 4, 18, "libx264", "lanczos", False))
         print(f"  [{cam}] {vids[0].name} -> {tag}_*.png + clip")
     print(f"\nTest outputs in {out_dir}")
     return 0
@@ -293,10 +364,14 @@ def main() -> int:
     ap.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better/larger (default 18).")
     ap.add_argument("--codec", default="libx264", help="ffmpeg video encoder (default libx264).")
     ap.add_argument("--scale-flags", default="lanczos", help="swscale kernel for input scaling (default lanczos).")
+    ap.add_argument("--gpu-decode", choices=["auto", "on", "off"], default="auto",
+                    help="Offload video decode to NVDEC/cuvid ('auto' = use it when a capable GPU "
+                         "and NVDEC decoder exist; encode/remap always stay on CPU).")
     ap.add_argument("--jobs", type=int, default=8, help="Parallel ffmpeg/copy workers (default 8).")
     ap.add_argument("--overwrite", action="store_true", help="Redo files that already exist in dst.")
     ap.add_argument("--verify", action="store_true",
-                    help="ffprobe-check that each undistorted frame count matches the source (slower).")
+                    help="ffprobe-check that each undistorted frame count matches the source "
+                         "(fast: demux-only packet count).")
     ap.add_argument("--test", action="store_true", help="Quick visual test only (no dataset written).")
     args = ap.parse_args()
 
@@ -350,13 +425,29 @@ def main() -> int:
             if out.exists() and not args.overwrite:
                 continue
             K, D, in_size = calib_cache[cam]
-            enc_jobs.append((str(vid), str(out), K, D, in_size, args.crop,
-                             args.gop, args.crf, args.codec, args.scale_flags))
+            enc_jobs.append([str(vid), str(out), K, D, in_size, args.crop,
+                             args.gop, args.crf, args.codec, args.scale_flags])
         else:
             out = dst / vid.relative_to(src)  # preserve extension (e.g. tactile .mkv)
             if out.exists() and not args.overwrite:
                 continue
             copy_jobs.append((str(vid), str(out)))
+
+    # Resolve GPU-decode capability once (per-file fallback still applies inside the worker for
+    # codecs/resolutions that can't use NVDEC). Encode + remap always run on CPU.
+    gpu_decode = False
+    if args.gpu_decode != "off" and enc_jobs:
+        _, sample_codec, _, _ = _probe_stream(enc_jobs[0][0])
+        dec_name = _CUVID.get(sample_codec)
+        if dec_name and _nvdec_functional(enc_jobs[0][0], dec_name):
+            gpu_decode = True
+            print(f"GPU decode: on (NVDEC {dec_name} for '{sample_codec}'; encode/remap on CPU).")
+        elif args.gpu_decode == "on":
+            ap.error(f"--gpu-decode=on but NVDEC unavailable for codec '{sample_codec}'.")
+        else:
+            print(f"GPU decode: off (no working NVDEC decoder for codec '{sample_codec}').")
+    for j in enc_jobs:
+        j.append(gpu_decode)
 
     print(f"Undistorting {len(enc_jobs)} wrist video(s); copying {len(copy_jobs)} other video(s) "
           f"verbatim with {args.jobs} worker(s) ...")

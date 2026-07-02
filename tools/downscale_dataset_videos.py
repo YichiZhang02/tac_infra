@@ -56,13 +56,60 @@ _CODEC_TAG = {
 }
 _LOSSLESS_CODECS = {"ffv1", "huffyuv", "rawvideo"}
 
+# Source codec (as ffprobe reports it) -> NVDEC (cuvid) decoder for GPU-offloaded decode.
+# Only decode is offloaded; scale + libx264 encode stay on CPU (the A100 has no NVENC unit).
+_CUVID = {
+    "h264": "h264_cuvid",
+    "hevc": "hevc_cuvid",
+    "av1": "av1_cuvid",
+    "vp9": "vp9_cuvid",
+    "vp8": "vp8_cuvid",
+    "mpeg4": "mpeg4_cuvid",
+    "mpeg2video": "mpeg2_cuvid",
+}
 
-def _scaled_encode(args: tuple[str, str, int, int, int, str, str]) -> tuple[str, bool, str]:
-    """Re-encode one video scaled to size x size. Returns (src_path, ok, message)."""
-    src, dst, size, gop, crf, codec, scale_flags = args
+
+def _probe_codec(path: str) -> str:
+    """First video stream codec name (e.g. 'hevc', 'h264'); '' on failure."""
+    try:
+        return subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "default=nokey=1:noprint_wrappers=1", path],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _nvdec_functional(sample_src: str, dec_name: str) -> bool:
+    """One-shot check that NVDEC can actually decode this codec on this box (a build listing the
+    decoder does not guarantee a capable device; e.g. driver/GPU mismatch)."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-c:v", dec_name,
+             "-i", sample_src, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True,
+        )
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _scaled_encode(args: tuple) -> tuple[str, bool, str]:
+    """Re-encode one video scaled to size x size. Returns (src_path, ok, message).
+
+    gpu_decode offloads decode to NVDEC (cuvid) — a big win for large HEVC cams (e.g. 1440x1080);
+    the scale (swscale) and encode (libx264) stay on CPU. Falls back to CPU decode transparently
+    when the source codec has no NVDEC decoder.
+    """
+    src, dst, size, gop, crf, codec, scale_flags, gpu_decode = args
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+    dec_name = _CUVID.get(_probe_codec(src)) if gpu_decode else None
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    if dec_name:
+        cmd += ["-hwaccel", "cuda", "-c:v", dec_name]
+    cmd += [
         "-i", src,
         "-map", "0:v:0",                                  # video stream only
         "-vf", f"scale={size}:{size}:flags={scale_flags}",
@@ -94,11 +141,13 @@ def _copy_verbatim(args: tuple[str, str]) -> tuple[str, bool, str]:
 
 
 def _frame_count(path: Path) -> int | None:
-    """Exact frame count via ffprobe (-count_frames). Returns None on failure."""
+    """Video frame count via ffprobe. Uses -count_packets (demux only, no decode): for these CFR
+    videos the packet count equals the frame count, and it is ~500x faster than -count_frames,
+    which decodes every frame single-threaded (minutes per HEVC file). Returns None on failure."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-count_frames", "-show_entries", "stream=nb_read_frames",
+             "-count_packets", "-show_entries", "stream=nb_read_packets",
              "-of", "default=nokey=1:noprint_wrappers=1", str(path)],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
@@ -175,12 +224,16 @@ def main() -> int:
     ap.add_argument("--codec", default="libx264", help="ffmpeg video encoder for RGB (default libx264).")
     ap.add_argument("--scale-flags", default="lanczos",
                     help="ffmpeg swscale kernel for downscaling (default lanczos = best detail).")
+    ap.add_argument("--gpu-decode", choices=["auto", "on", "off"], default="auto",
+                    help="Offload video decode to NVDEC/cuvid ('auto' = use it when a capable GPU "
+                         "and NVDEC decoder exist; scale/encode always stay on CPU).")
     ap.add_argument("--jobs", type=int, default=8, help="Parallel ffmpeg/copy workers (default 8).")
     ap.add_argument("--cameras", nargs="*", default=None,
                     help="Force this exact set of camera keys to downscale (overrides auto-detect).")
     ap.add_argument("--overwrite", action="store_true", help="Redo files that already exist in dst.")
     ap.add_argument("--verify", action="store_true",
-                    help="ffprobe-check that each re-encoded frame count matches the source (slower).")
+                    help="ffprobe-check that each re-encoded frame count matches the source "
+                         "(fast: demux-only packet count).")
     args = ap.parse_args()
 
     src, dst = args.src.resolve(), args.dst.resolve()
@@ -216,12 +269,28 @@ def main() -> int:
             out = (dst / vid.relative_to(src)).with_suffix(".mp4")  # RGB targets -> .mp4 (global path)
             if out.exists() and not args.overwrite:
                 continue
-            enc_jobs.append((str(vid), str(out), args.size, args.gop, args.crf, args.codec, args.scale_flags))
+            enc_jobs.append([str(vid), str(out), args.size, args.gop, args.crf, args.codec, args.scale_flags])
         else:
             out = dst / vid.relative_to(src)  # preserve extension (e.g. tactile .mkv)
             if out.exists() and not args.overwrite:
                 continue
             copy_jobs.append((str(vid), str(out)))
+
+    # Resolve GPU-decode capability once (per-file fallback still applies inside the worker for
+    # codecs without an NVDEC decoder). Scale + encode always run on CPU.
+    gpu_decode = False
+    if args.gpu_decode != "off" and enc_jobs:
+        sample_codec = _probe_codec(enc_jobs[0][0])
+        dec_name = _CUVID.get(sample_codec)
+        if dec_name and _nvdec_functional(enc_jobs[0][0], dec_name):
+            gpu_decode = True
+            print(f"GPU decode: on (NVDEC for '{sample_codec}'; scale/encode on CPU).")
+        elif args.gpu_decode == "on":
+            ap.error(f"--gpu-decode=on but NVDEC unavailable for codec '{sample_codec}'.")
+        else:
+            print(f"GPU decode: off (no working NVDEC decoder for codec '{sample_codec}').")
+    for j in enc_jobs:
+        j.append(gpu_decode)
 
     print(f"Re-encoding {len(enc_jobs)} RGB video(s); copying {len(copy_jobs)} other video(s) verbatim "
           f"with {args.jobs} worker(s) ...")

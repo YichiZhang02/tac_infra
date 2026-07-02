@@ -260,6 +260,18 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             "config instead of the pretrained/checkpoint processor (different dims/steps; avoids the "
             "inference-only EE preprocessing step during training)."
         )
+        # The rebuilt-from-scratch processor would otherwise fall back to the HF hub tokenizer name
+        # (the local path carried by the pretrained processor json is discarded here). For pi05, pull
+        # the tokenizer straight from the pretrained model dir so the saved checkpoint stays offline-usable.
+        if getattr(active_cfg, "type", None) == "pi05":
+            _tokenizer_dir = processor_pretrained_path / "paligemma-3b-pt-224-tokenizer"
+            if _tokenizer_dir.is_dir():
+                active_cfg.paligemma_tokenizer_path = str(_tokenizer_dir)
+            else:
+                logging.warning(
+                    f"Local paligemma tokenizer not found at {_tokenizer_dir}; the rebuilt processor "
+                    "will fall back to the 'google/paligemma-3b-pt-224' HF hub name."
+                )
         processor_pretrained_path = None
 
     processor_kwargs = {}

@@ -74,6 +74,11 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
 
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
 
+    # Source for the PaliGemma tokenizer. None -> use the HF hub name "google/paligemma-3b-pt-224"
+    # (unchanged default). Only the EE rebuild path in train.py sets this to the local tokenizer dir
+    # under pretrained_path so the rebuilt-from-scratch processor stays offline-usable.
+    paligemma_tokenizer_path: str | None = None
+
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.IDENTITY,

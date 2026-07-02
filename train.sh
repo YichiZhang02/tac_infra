@@ -17,8 +17,8 @@ log_freq=100
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
-state_mode=${8:-joint}  # none | joint | episode_ee | absolute_ee
-action_mode=${9:-joint}  # joint | relative_ee
+state_mode=${8:-episode_ee}  # none | joint | episode_ee | absolute_ee
+action_mode=${9:-relative_ee}  # joint | relative_ee
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
 tactile_encoder_path=${TACTILE_ENCODER_PATH:-${10:-playground/pretrained_models/AnyTouch-ViT-L-16}}

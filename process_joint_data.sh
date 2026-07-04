@@ -12,7 +12,7 @@ cd "$(dirname "$0")" || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
 
 # =================== 配置 (只有 dataset_id 必填) ===================
-dataset_id=${1:-rm_umi_dual_260701_pen_in_case_notac}
+dataset_id=${1:-rm_umi_dual_260703_pen_in_case}
 size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
 horizon=${3:-32}      # action_relative_ee 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
 

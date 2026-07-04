@@ -78,6 +78,7 @@ def save_checkpoint(
     scheduler: LRScheduler | None = None,
     preprocessor: "PolicyProcessorPipeline | None" = None,
     postprocessor: "PolicyProcessorPipeline | None" = None,
+    save_training_state_dir: bool = True,
 ) -> None:
     """This function creates the following directory structure:
 
@@ -115,7 +116,8 @@ def save_checkpoint(
         preprocessor.save_pretrained(pretrained_dir)
     if postprocessor is not None:
         postprocessor.save_pretrained(pretrained_dir)
-    save_training_state(checkpoint_dir, step, optimizer, scheduler)
+    if save_training_state_dir:
+        save_training_state(checkpoint_dir, step, optimizer, scheduler)
 
 
 def save_training_state(

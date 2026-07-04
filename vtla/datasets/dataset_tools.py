@@ -245,6 +245,8 @@ def merge_datasets(
     datasets: list[LeRobotDataset],
     output_repo_id: str,
     output_dir: str | Path | None = None,
+    data_files_size_in_mb: int | None = None,
+    video_files_size_in_mb: int | None = None,
 ) -> LeRobotDataset:
     """Merge multiple LeRobotDatasets into a single dataset.
 
@@ -254,6 +256,12 @@ def merge_datasets(
         datasets: List of LeRobotDatasets to merge.
         output_repo_id: Merged dataset identifier.
         output_dir: Root directory where the merged dataset will be stored. If not specified, defaults to $HF_LEROBOT_HOME/output_repo_id.
+        data_files_size_in_mb: Max size (MB) per aggregated parquet file. ``None`` uses aggregate's default.
+        video_files_size_in_mb: Max size (MB) per aggregated video file. Sources are concatenated until
+            adding the next source file would reach this limit, then a new file is started. Set this small
+            (e.g. 5-10) to keep many small per-episode mp4s instead of a few giant ones — large mp4s make
+            random-access frame decoding (pyav ``av.open`` reparses the whole moov index every ``__getitem__``)
+            much slower during training. ``None`` uses aggregate's default.
     """
     if not datasets:
         raise ValueError("No datasets to merge")
@@ -268,6 +276,8 @@ def merge_datasets(
         aggr_repo_id=output_repo_id,
         roots=roots,
         aggr_root=output_dir,
+        data_files_size_in_mb=data_files_size_in_mb,
+        video_files_size_in_mb=video_files_size_in_mb,
     )
 
     merged_dataset = LeRobotDataset(

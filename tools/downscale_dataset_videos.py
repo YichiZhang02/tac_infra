@@ -96,16 +96,9 @@ def _nvdec_functional(sample_src: str, dec_name: str) -> bool:
         return False
 
 
-def _scaled_encode(args: tuple) -> tuple[str, bool, str]:
-    """Re-encode one video scaled to size x size. Returns (src_path, ok, message).
-
-    gpu_decode offloads decode to NVDEC (cuvid) — a big win for large HEVC cams (e.g. 1440x1080);
-    the scale (swscale) and encode (libx264) stay on CPU. Falls back to CPU decode transparently
-    when the source codec has no NVDEC decoder.
-    """
-    src, dst, size, gop, crf, codec, scale_flags, gpu_decode = args
-    Path(dst).parent.mkdir(parents=True, exist_ok=True)
-    dec_name = _CUVID.get(_probe_codec(src)) if gpu_decode else None
+def _run_scale(src, dst, size, gop, crf, codec, scale_flags, dec_name):
+    """One scale+encode ffmpeg run. dec_name = NVDEC decoder to use, or None for CPU decode.
+    Returns (ok, last_error_line)."""
     cmd = ["ffmpeg", "-y", "-loglevel", "error"]
     if dec_name:
         cmd += ["-hwaccel", "cuda", "-c:v", dec_name]
@@ -125,8 +118,28 @@ def _scaled_encode(args: tuple) -> tuple[str, bool, str]:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         msg = (e.stderr or e.stdout or str(e)).strip()
-        return src, False, msg.splitlines()[-1] if msg else str(e)
-    return src, True, ""
+        return False, msg.splitlines()[-1] if msg else str(e)
+    return True, ""
+
+
+def _scaled_encode(args: tuple) -> tuple[str, bool, str]:
+    """Re-encode one video scaled to size x size. Returns (src_path, ok, message).
+
+    gpu_codecs is the set of source codecs NVDEC was verified to handle on this box; only files in
+    that set take the GPU decode path (a big win for large HEVC cams, e.g. 1440x1080), the rest
+    decode on CPU. If a GPU decode fails (e.g. the box lists av1_cuvid but cannot decode AV1), the
+    file is retried once on CPU rather than reported as a hard failure.
+    """
+    src, dst, size, gop, crf, codec, scale_flags, gpu_codecs = args
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    src_codec = _probe_codec(src)
+    dec_name = _CUVID.get(src_codec) if src_codec in gpu_codecs else None
+    ok, msg = _run_scale(src, dst, size, gop, crf, codec, scale_flags, dec_name)
+    # Defensive: a GPU decode that failed despite the codec passing the per-codec probe -> retry
+    # once on CPU before giving up.
+    if not ok and dec_name is not None:
+        ok, msg = _run_scale(src, dst, size, gop, crf, codec, scale_flags, dec_name=None)
+    return src, ok, msg
 
 
 def _copy_verbatim(args: tuple[str, str]) -> tuple[str, bool, str]:
@@ -276,21 +289,32 @@ def main() -> int:
                 continue
             copy_jobs.append((str(vid), str(out)))
 
-    # Resolve GPU-decode capability once (per-file fallback still applies inside the worker for
-    # codecs without an NVDEC decoder). Scale + encode always run on CPU.
-    gpu_decode = False
+    # Resolve GPU-decode capability once per distinct source codec (a mixed-codec dataset can hold
+    # e.g. mostly hevc plus a few av1; probing only the first file would wrongly enable NVDEC for
+    # a codec this box can't hardware-decode, causing hard FAIL for those files). Only codecs that
+    # pass the probe take the GPU path; the rest decode on CPU. Scale + encode always run on CPU.
+    gpu_codecs: set[str] = set()
     if args.gpu_decode != "off" and enc_jobs:
-        sample_codec = _probe_codec(enc_jobs[0][0])
-        dec_name = _CUVID.get(sample_codec)
-        if dec_name and _nvdec_functional(enc_jobs[0][0], dec_name):
-            gpu_decode = True
-            print(f"GPU decode: on (NVDEC for '{sample_codec}'; scale/encode on CPU).")
-        elif args.gpu_decode == "on":
-            ap.error(f"--gpu-decode=on but NVDEC unavailable for codec '{sample_codec}'.")
-        else:
-            print(f"GPU decode: off (no working NVDEC decoder for codec '{sample_codec}').")
+        codecs: dict[str, str] = {}
+        for j in enc_jobs:
+            c = _probe_codec(j[0])
+            codecs.setdefault(c, j[0])  # first sample file seen for this codec
+        bad_codecs = []
+        for c, sample in codecs.items():
+            dec_name = _CUVID.get(c)
+            if dec_name and _nvdec_functional(sample, dec_name):
+                gpu_codecs.add(c)
+            else:
+                bad_codecs.append(c)
+        if gpu_codecs:
+            print(f"GPU decode: on for codec(s) {sorted(gpu_codecs)} (NVDEC; scale/encode on CPU).")
+        if bad_codecs:
+            if args.gpu_decode == "on":
+                ap.error(f"--gpu-decode=on but NVDEC unavailable for codec(s) {sorted(bad_codecs)}.")
+            print(f"GPU decode: CPU fallback for codec(s) {sorted(bad_codecs)} "
+                  f"(no working NVDEC decoder).")
     for j in enc_jobs:
-        j.append(gpu_decode)
+        j.append(gpu_codecs)
 
     print(f"Re-encoding {len(enc_jobs)} RGB video(s); copying {len(copy_jobs)} other video(s) verbatim "
           f"with {args.jobs} worker(s) ...")

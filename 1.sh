@@ -1,0 +1,1 @@
+sh train.sh rm_umi_pen_in_case_notac_undist_256_merged starvla_groot 8 16 60_000 true none joint joint

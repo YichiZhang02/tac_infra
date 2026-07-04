@@ -167,16 +167,67 @@ def _nvdec_functional(sample_src: str, dec_name: str) -> bool:
         return False
 
 
+def _decode_remap_encode(src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+                         codec, scale_flags, src_codec, use_gpu):
+    """Run one decode -> remap -> encode pipeline. Returns (frames_written, dec_rc, enc_rc).
+
+    Split out of _undistort_encode so a failed GPU decode can be retried on CPU with the same
+    remap maps (see the per-file fallback in _undistort_encode)."""
+    if use_gpu:
+        dec = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+             "-c:v", _CUVID[src_codec], "-i", src, "-map", "0:v:0",
+             "-vf", "hwdownload,format=nv12", "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
+            stdout=subprocess.PIPE,
+        )
+        frame_bytes = in_w * in_h * 3 // 2  # NV12 = 1.5 bytes/pixel
+    else:
+        dec = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-i", src, "-map", "0:v:0",
+             "-vf", f"scale={in_w}:{in_h}:flags={scale_flags}",
+             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+            stdout=subprocess.PIPE,
+        )
+        frame_bytes = in_w * in_h * 3
+    enc = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop}x{crop}", "-r", f"{fps}",
+         "-i", "-", "-c:v", codec, "-crf", str(crf), "-g", str(gop),
+         "-pix_fmt", "yuv420p", "-an", "-vsync", "0", dst],
+        stdin=subprocess.PIPE,
+    )
+    frames = 0
+    while True:
+        raw = dec.stdout.read(frame_bytes)
+        if len(raw) != frame_bytes:
+            break
+        if use_gpu:
+            yuv = np.frombuffer(raw, np.uint8).reshape(in_h * 3 // 2, in_w)
+            frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV12)
+        else:
+            frame = np.frombuffer(raw, np.uint8).reshape(in_h, in_w, 3)
+        out = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT)
+        enc.stdin.write(np.ascontiguousarray(out).tobytes())
+        frames += 1
+    dec.stdout.close()
+    dec.wait()
+    enc.stdin.close()
+    enc.wait()
+    return frames, dec.returncode, enc.returncode
+
+
 def _undistort_encode(args: tuple) -> tuple[str, bool, str]:
     """Undistort + center-crop one video into dst. Returns (src_path, ok, message).
 
     gpu_decode offloads the H.264/HEVC/AV1 decode to NVDEC (cuvid) and downloads frames as NV12
     (half the bytes of BGR); the colour-convert (cv2), fisheye remap (cv2) and encode (libx264)
-    stay on CPU. Only used when the source resolution equals the calibration resolution (so no
-    resize is needed) and the codec has an NVDEC decoder; otherwise this file falls back to the
-    CPU decode path transparently.
+    stay on CPU. gpu_codecs is the set of source codecs NVDEC was verified to handle on this box;
+    only files in that set (and at the calibration resolution) take the GPU path, everything else
+    decodes on CPU. If a GPU decode still produces zero frames it is retried on CPU rather than
+    silently written as an empty stub.
     """
-    (src, dst, K_list, D_list, in_size, crop, gop, crf, codec, scale_flags, gpu_decode) = args
+    (src, dst, K_list, D_list, in_size, crop, gop, crf, codec, scale_flags, gpu_codecs) = args
     in_w, in_h = in_size
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -188,49 +239,23 @@ def _undistort_encode(args: tuple) -> tuple[str, bool, str]:
         map2 = np.ascontiguousarray(map2[y0:y0 + crop, x0:x0 + crop])
         fps, src_codec, src_w, src_h = _probe_stream(src)
         # NVDEC path only when no resize is needed (maps are computed at the calibration
-        # resolution) and the codec is NVDEC-decodable.
-        use_gpu = (gpu_decode and (src_w, src_h) == (in_w, in_h) and src_codec in _CUVID)
-        if use_gpu:
-            dec = subprocess.Popen(
-                ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                 "-c:v", _CUVID[src_codec], "-i", src, "-map", "0:v:0",
-                 "-vf", "hwdownload,format=nv12", "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
-                stdout=subprocess.PIPE,
-            )
-            frame_bytes = in_w * in_h * 3 // 2  # NV12 = 1.5 bytes/pixel
-        else:
-            dec = subprocess.Popen(
-                ["ffmpeg", "-v", "error", "-i", src, "-map", "0:v:0",
-                 "-vf", f"scale={in_w}:{in_h}:flags={scale_flags}",
-                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-                stdout=subprocess.PIPE,
-            )
-            frame_bytes = in_w * in_h * 3
-        enc = subprocess.Popen(
-            ["ffmpeg", "-y", "-v", "error",
-             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop}x{crop}", "-r", f"{fps}",
-             "-i", "-", "-c:v", codec, "-crf", str(crf), "-g", str(gop),
-             "-pix_fmt", "yuv420p", "-an", "-vsync", "0", dst],
-            stdin=subprocess.PIPE,
-        )
-        while True:
-            raw = dec.stdout.read(frame_bytes)
-            if len(raw) != frame_bytes:
-                break
-            if use_gpu:
-                yuv = np.frombuffer(raw, np.uint8).reshape(in_h * 3 // 2, in_w)
-                frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV12)
-            else:
-                frame = np.frombuffer(raw, np.uint8).reshape(in_h, in_w, 3)
-            out = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR,
-                            borderMode=cv2.BORDER_CONSTANT)
-            enc.stdin.write(np.ascontiguousarray(out).tobytes())
-        dec.stdout.close()
-        dec.wait()
-        enc.stdin.close()
-        enc.wait()
-        if enc.returncode != 0:
+        # resolution) and this codec was verified NVDEC-decodable on this box.
+        use_gpu = (src_codec in gpu_codecs and (src_w, src_h) == (in_w, in_h)
+                   and src_codec in _CUVID)
+        frames, dec_rc, enc_rc = _decode_remap_encode(
+            src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+            codec, scale_flags, src_codec, use_gpu)
+        # Defensive: a GPU decode that still yielded nothing means NVDEC choked on this file
+        # despite the codec passing the probe. Retry once on CPU before giving up so we never
+        # emit a zero-frame stub.
+        if frames == 0 and use_gpu:
+            frames, dec_rc, enc_rc = _decode_remap_encode(
+                src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+                codec, scale_flags, src_codec, use_gpu=False)
+        if enc_rc != 0:
             return src, False, "ffmpeg encode returned non-zero"
+        if frames == 0:
+            return src, False, "produced 0 frames (decode failed)"
     except Exception as e:  # noqa: BLE001
         return src, False, str(e)
     return src, True, ""
@@ -433,21 +458,32 @@ def main() -> int:
                 continue
             copy_jobs.append((str(vid), str(out)))
 
-    # Resolve GPU-decode capability once (per-file fallback still applies inside the worker for
-    # codecs/resolutions that can't use NVDEC). Encode + remap always run on CPU.
-    gpu_decode = False
+    # Resolve GPU-decode capability once per distinct source codec (a mixed-codec dataset can hold
+    # e.g. mostly hevc plus a few av1; probing only the first file would wrongly enable NVDEC for
+    # a codec this box can't hardware-decode, silently producing empty videos). Only codecs that
+    # pass the probe take the GPU path; the rest decode on CPU. Encode + remap always run on CPU.
+    gpu_codecs: set[str] = set()
     if args.gpu_decode != "off" and enc_jobs:
-        _, sample_codec, _, _ = _probe_stream(enc_jobs[0][0])
-        dec_name = _CUVID.get(sample_codec)
-        if dec_name and _nvdec_functional(enc_jobs[0][0], dec_name):
-            gpu_decode = True
-            print(f"GPU decode: on (NVDEC {dec_name} for '{sample_codec}'; encode/remap on CPU).")
-        elif args.gpu_decode == "on":
-            ap.error(f"--gpu-decode=on but NVDEC unavailable for codec '{sample_codec}'.")
-        else:
-            print(f"GPU decode: off (no working NVDEC decoder for codec '{sample_codec}').")
+        codecs = {}
+        for j in enc_jobs:
+            _, c, _, _ = _probe_stream(j[0])
+            codecs.setdefault(c, j[0])  # first sample file seen for this codec
+        bad_codecs = []
+        for c, sample in codecs.items():
+            dec_name = _CUVID.get(c)
+            if dec_name and _nvdec_functional(sample, dec_name):
+                gpu_codecs.add(c)
+            else:
+                bad_codecs.append(c)
+        if gpu_codecs:
+            print(f"GPU decode: on for codec(s) {sorted(gpu_codecs)} (NVDEC; encode/remap on CPU).")
+        if bad_codecs:
+            if args.gpu_decode == "on":
+                ap.error(f"--gpu-decode=on but NVDEC unavailable for codec(s) {sorted(bad_codecs)}.")
+            print(f"GPU decode: CPU fallback for codec(s) {sorted(bad_codecs)} "
+                  f"(no working NVDEC decoder).")
     for j in enc_jobs:
-        j.append(gpu_decode)
+        j.append(gpu_codecs)
 
     print(f"Undistorting {len(enc_jobs)} wrist video(s); copying {len(copy_jobs)} other video(s) "
           f"verbatim with {args.jobs} worker(s) ...")

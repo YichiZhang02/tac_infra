@@ -463,6 +463,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     scheduler=lr_scheduler,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
+                    save_training_state_dir=False,
                 )
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:

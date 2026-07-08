@@ -193,6 +193,13 @@ class DiffusionConfig(SensorRoutingMixin, PreTrainedConfig):
                 "The horizon should be an integer multiple of the downsampling factor (which is determined "
                 f"by `len(down_dims)`). Got {self.horizon=} and {self.down_dims=}"
             )
+        # 可执行动作上界: horizon - n_obs_steps + 1 (见 select_action 的时序图)。offset 从此窗口内起算。
+        max_exec = self.horizon - self.n_obs_steps + 1
+        if self.action_start_offset < 0 or self.action_start_offset + self.n_action_steps > max_exec:
+            raise ValueError(
+                f"action_start_offset ({self.action_start_offset}) + n_action_steps ({self.n_action_steps}) "
+                f"must be in [0, horizon - n_obs_steps + 1 = {max_exec}]"
+            )
         # Shared enum / reserved-mode validation (tactile_mode, state_mode, encoder).
         self.validate_sensor_modes()
 

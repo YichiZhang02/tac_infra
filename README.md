@@ -318,11 +318,26 @@ python -m deployment.collect \
 推荐用 `inference.sh`(按 `pretrained_id` + `step` 自动拼 checkpoint 路径, `--match_policy` 自动对齐硬件 + 任务):
 
 ```bash
-# 用法: bash inference.sh <pretrained_id> <step>
+# 用法: bash inference.sh <pretrained_id> <step> [n_action_steps] [action_start_offset]
 bash inference.sh rm_umi_dual_pen_open_diffusion_wristonly_false_tactile_none_state_joint 5000
 ```
 
 `pretrained_id` 即 `playground/results/models/` 下的目录名, 实际加载 `playground/results/models/<pretrained_id>/checkpoints/<step 补零6位>/pretrained_model`。
+
+位置参数 (`$3`/`$4` 留空则完全用 checkpoint config.json 里的值, 不覆盖):
+
+| 序号 | 参数 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| 3 | `n_action_steps` | *(checkpoint 默认)* | 每次推理执行几个 action 再重规划(`chunk[:n]`)。调小可提高响应性但推理更频繁。 |
+| 4 | `action_start_offset` | *(checkpoint 默认, 通常 0)* | 执行前丢掉 chunk 前 m 个动作 (`chunk[m:]`)。实际执行 `chunk[m : m+n]`。用于补偿模型推理延迟 —— 推理期间机器人已执行了若干步, 丢掉对应的陈旧开头动作。须满足 `m + n ≤ chunk_size`。 |
+
+```bash
+# 覆盖 n_action_steps=8 (默认 chunk 仍从头开始)
+bash inference.sh <id> 5000 8
+
+# 同时覆盖 n_action_steps=8 且丢掉 chunk 前 4 个动作 -> 执行 chunk[4:12]
+bash inference.sh <id> 5000 8 4
+```
 
 或直接调脚本:
 
@@ -382,3 +397,57 @@ stdout 直接输出 `--robot.home_joints='...'` 字符串, 复制后替换 `infe
 ```
 
 > 采集(`collect`)/遥操作无 policy, `auto` 即**关闭**, 存原生鱼眼, 之后用 `tools/undistort_dataset_videos.py` 离线去畸变 —— 切勿在采集端就去畸变(会丢失原始数据)。
+
+---
+
+## 关节数据集预处理流水线 (`process_joint_data.sh`)
+
+对从机械臂关节角采集的原始数据集做**三步串联预处理**: 去畸变 → 降分辨率 → 关节转末端位姿(FK)。非破坏, 逐级生成新副本, 原始数据集不动。
+
+```bash
+# 用法: bash process_joint_data.sh <dataset_id> [size] [horizon]
+bash process_joint_data.sh rm_umi_dual_260707_pen_in_case_1
+```
+
+位置参数:
+
+| 序号 | 参数 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `dataset_id` | *(必填)* | `playground/data/<dataset_id>` |
+| 2 | `size` | `256` | 降分辨率目标边长(给 224 裁剪留余量) |
+| 3 | `horizon` | `32` | `action_relative_ee` 统计的最大 chunk 步长; 训练 `chunk_size` 须 ≤ 该值 |
+
+产物:
+```
+<id>                 (原始, 不动)
+  -> <id>_undist           鱼眼去畸变 + 居中裁 896
+  -> <id>_undist_<size>    降到 size×size  ← 训练用这个 (就地加 EE 列)
+```
+
+可选环境变量: `CROP`(去畸变裁剪边长, 默认 `896`)、`JOBS`(ffmpeg 并行数, 默认 `12`)、`CAMERAS`、`CALIB`(同 `undistort_dataset_videos.py`)。已存在的中间目录自动跳过(幂等)。
+
+## UMI 数据集预处理流水线 (`process_umi_data.sh`)
+
+与 `process_joint_data.sh` 完全同流程, 但第 3 步换成 `convert_umi_to_eepose`(UMI 数据本身已存末端位姿, 跳过 FK; 若 `meta/episodes` 缺失会自动从帧数重建)。其余参数、产物目录命名规则、环境变量完全一致。
+
+```bash
+# 用法: bash process_umi_data.sh <dataset_id> [size] [horizon]
+bash process_umi_data.sh rm_umi_dual_260707_pen_in_case_1
+```
+
+> **dataset_id 必填**(`process_joint_data.sh` 有内置默认值; 本脚本要求显式指定以避免误操作)。
+
+## 多数据集合并 (`merge_datasets.sh`)
+
+对多个特征不一致的数据集取特征**交集对齐**后合并成单一训练数据集。典型场景: 无触觉数据 + 有触觉相机数据同时训练(后者多出 finger 相机 feature, 直接 aggregate 报错)。
+
+```bash
+# 用法: bash merge_datasets.sh <out_id> <src_id_1> <src_id_2> [<src_id_3> ...]
+bash merge_datasets.sh merged_notac_undist_256 \
+    rm_umi_dual_260706_pen_in_case_notac_undist_256 \
+    rm_umi_dual_260706_pen_in_case_1_notac_undist_256
+```
+
+产物 `playground/data/<out_id>` 非破坏生成(输出目录已存在时报错拒绝覆盖)。合并后按 10 MB 分片重编码视频(保持小 mp4 布局, 避免训练随机取帧慢)。合并结果是 notac 数据集, 用 `tactile_mode=none` 训练。
+
+> 所有 id 均为 `playground/data/` 下的目录名(不含路径)。

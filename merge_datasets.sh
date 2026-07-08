@@ -15,9 +15,9 @@ REPO_ROOT="$(pwd)"
 
 dataset_root=playground/data
 
-out_id=rm_umi_pen_in_case_notac_undist_256_merged
+out_id=rm_umi_dual_260706_pen_in_case_merged_notac_undist_256
 
-srcs=(rm_umi_dual_260701_pen_in_case_notac_undist_256 rm_umi_dual_260702_pen_in_case_undist_256)
+srcs=(rm_umi_dual_260706_pen_in_case_notac_undist_256 rm_umi_dual_260706_pen_in_case_1_notac_undist_256)
 
 
 roots=()

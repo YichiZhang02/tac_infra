@@ -301,7 +301,8 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
     def select_action(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
         self.eval()
         if len(self._action_queue) == 0:
-            actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            off = self.config.action_start_offset
+            actions = self.predict_action_chunk(batch)[:, off : off + self.config.n_action_steps]
             # (B, n_action_steps, action_dim) -> queue of (B, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()

@@ -152,6 +152,11 @@ class ACTConfig(SensorRoutingMixin, PreTrainedConfig):
                 f"The chunk size is the upper bound for the number of action steps per model invocation. Got "
                 f"{self.n_action_steps} for `n_action_steps` and {self.chunk_size} for `chunk_size`."
             )
+        if self.action_start_offset < 0 or self.action_start_offset + self.n_action_steps > self.chunk_size:
+            raise ValueError(
+                f"action_start_offset ({self.action_start_offset}) + n_action_steps ({self.n_action_steps}) "
+                f"must be in [0, chunk_size={self.chunk_size}]"
+            )
         if self.n_obs_steps != 1:
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"

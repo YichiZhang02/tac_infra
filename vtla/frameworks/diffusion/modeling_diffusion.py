@@ -362,8 +362,9 @@ class DiffusionModel(nn.Module):
         # run sampling
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
 
-        # Extract `n_action_steps` steps worth of actions (from the current observation).
-        start = n_obs_steps - 1
+        # Extract `n_action_steps` steps worth of actions (from the current observation),
+        # optionally skipping the first `action_start_offset` of them.
+        start = n_obs_steps - 1 + self.config.action_start_offset
         end = start + self.config.n_action_steps
         actions = actions[:, start:end]
 

@@ -88,6 +88,12 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # VLA 语言指令, 不再依赖训练数据集是否还在。多任务/旧 checkpoint 为 None。
     single_task: str | None = None
 
+    # 执行 action chunk 时跳过的前 N 个动作: 实际执行 chunk[offset : offset + n_action_steps]。
+    # 0 = 现有行为 (从 chunk 头部取)。用于丢掉 chunk 前段还没"跟上"当前观测的动作 (推理专用旋钮,
+    # 训练无关)。仅 chunking 类策略消费。老 checkpoint 的 config.json 无此字段时由此默认值补 0,
+    # 行为与改动前完全一致。约束 (chunk_size 或 horizon 边界) 由各框架 __post_init__ 校验。
+    action_start_offset: int = 0
+
     def __post_init__(self) -> None:
         if not self.device or not is_torch_device_available(self.device):
             auto_device = auto_select_torch_device()

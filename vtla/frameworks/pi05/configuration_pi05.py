@@ -121,6 +121,11 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
             raise ValueError(
                 f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
             )
+        if self.action_start_offset < 0 or self.action_start_offset + self.n_action_steps > self.chunk_size:
+            raise ValueError(
+                f"action_start_offset ({self.action_start_offset}) + n_action_steps ({self.n_action_steps}) "
+                f"must be in [0, chunk_size={self.chunk_size}]"
+            )
 
         if self.paligemma_variant not in ["gemma_300m", "gemma_2b"]:
             raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")

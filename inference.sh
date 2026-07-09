@@ -35,7 +35,7 @@ python -m deployment.inference \
   --dataset.repo_id=${repo_id} \
   ${policy_overrides} \
   --match_policy=true \
-  --robot.home_joints='{"left_main_joint1": -0.018531, "left_main_joint2": 0.24981, "left_main_joint3": 0.155477, "left_main_joint4": 1.486658, "left_main_joint5": 0.042135, "left_main_joint6": 1.292984, "left_main_joint7": 0.120061, "right_main_joint1": 0.053178, "right_main_joint2": 0.188806, "right_main_joint3": -0.154118, "right_main_joint4": 1.481587, "right_main_joint5": -0.002833, "right_main_joint6": 1.343616, "right_main_joint7": -0.149679}' \
+  --robot.home_joints='{"left_main_joint1": -0.109262, "left_main_joint2": 0.235679, "left_main_joint3": 0.118975, "left_main_joint4": 1.265910, "left_main_joint5": 0.034194, "left_main_joint6": 1.589552, "left_main_joint7": -0.278270, "right_main_joint1": 0.041508, "right_main_joint2": 0.100594, "right_main_joint3": 0.046601, "right_main_joint4": 1.527823, "right_main_joint5": 0.011595, "right_main_joint6": 1.477732, "right_main_joint7": 0.472311}' \
   --robot.home_gripper=1.0 \
   --robot.max_ee_pos_step_m=0.1  # ee用这个值来防止直接撞 初次0.01 后面0.1
 

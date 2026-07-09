@@ -6,10 +6,12 @@ cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效,
 pretrained_id=${1:-20260624_230105_rm_umi_dual_260617_pen_place_cap_notop_undist_256_diffusion_wristonly_true_tactile_none_state_episode_ee_action_relative_ee}
 step=${2:-15000}
 
+# 推理时的 action chunk 旋钮 (空=不覆盖, 用 checkpoint config.json 里的训练值):
 #   n_action_steps      执行 chunk 里的前几个动作后再重规划 (chunk[:n])。chunk_size 与训练同步, 不用动。
 #   action_start_offset 执行前先丢掉 chunk 的前 m 个动作 (chunk[m:]); 实际执行 chunk[m : m+n]。
-action_start_offset=${3:-0}
-n_action_steps=${4:-20}
+# 顺序须与 README / 用法行一致: $3=n_action_steps, $4=action_start_offset。
+n_action_steps=${3:-}
+action_start_offset=${4:-}
 
 # ===============================================
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)

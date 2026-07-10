@@ -20,9 +20,12 @@ tactile_mode=${7:-none}  # none | as_image | encode
 state_mode=${8:-joint}  # none | joint | episode_ee | absolute_ee
 action_mode=${9:-joint}  # joint | relative_ee
 
+# 数据增强
+augmentation_mode=${10:-none}  # none | mild | strong
+
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
-tactile_encoder_path=${TACTILE_ENCODER_PATH:-${10:-playground/pretrained_models/AnyTouch-ViT-L-16}}
-tactile_insert_location=${TACTILE_INSERT_LOCATION:-${11:-encoder}}  # 触觉插入位置
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${11:-playground/pretrained_models/AnyTouch-ViT-L-16}}
+tactile_insert_location=${TACTILE_INSERT_LOCATION:-${12:-encoder}}  # 触觉插入位置
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-16}  # 触觉 tokens / per image
 
 # 相机/触觉 key 配置
@@ -33,7 +36,7 @@ tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.i
 
 # =================== 不是很需要改动的配置 ===================
 # 保存的模型/日志名拼接规则
-policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}"
+policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_aug_${augmentation_mode}"
 # 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
 run_name="$(date +%Y%m%d_%H%M%S)_${dataset_id}_${policy_type}_${policy_suffix}"
 
@@ -78,6 +81,11 @@ if [ -n "${pretrained_path}" ]; then
   extra_args="${extra_args} --policy.pretrained_path=${pretrained_path}"
 fi
 
+# augmentation_mode: none | default | mild
+if [ "${augmentation_mode}" != "none" ]; then
+  extra_args="${extra_args} --dataset.image_transforms.preset=${augmentation_mode}"
+fi
+
 # tactile_mode=encode 时追加 tactile encoder 相关参数（四个 framework 通用）
 if [ "${tactile_mode}" = "encode" ]; then
   if [ -z "${tactile_encoder_path}" ]; then
@@ -97,7 +105,7 @@ echo "Training with dataset: $dataset_id"
 echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
-echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode | Action mode: $action_mode"
+echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode | Action mode: $action_mode | Augmentation mode: $augmentation_mode"
 echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
 echo "Tactile keys:   ${tactile_keys}"

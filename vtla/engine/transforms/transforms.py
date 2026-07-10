@@ -162,6 +162,15 @@ class ImageTransformConfig:
     kwargs: dict[str, Any] = field(default_factory=dict)
 
 
+_AUGMENTATION_PRESETS: dict[str, dict] = {
+    # preset name -> overrides applied in ImageTransformsConfig.__post_init__
+    # Only brightness and contrast ranges differ between presets; other transforms stay at their defaults.
+    "none":   {"enable": False},
+    "mild":   {"enable": True, "brightness": (0.8, 1.2), "contrast": (0.8, 1.2)},
+    "strong": {"enable": True, "brightness": (0.5, 1.5), "contrast": (0.5, 1.5)},
+}
+
+
 @dataclass
 class ImageTransformsConfig:
     """
@@ -169,9 +178,19 @@ class ImageTransformsConfig:
     You can find out how these transformations affect images here:
     https://pytorch.org/vision/0.18/auto_examples/transforms/plot_transforms_illustrations.html
     We use a custom RandomSubsetApply container to sample them.
+
+    Use `preset` to pick a named brightness/contrast level:
+      - "none"    : augmentation disabled
+      - "default" : brightness=(0.8, 1.2), contrast=(0.8, 1.2)
+      - "mild"    : brightness=(0.5, 1.5), contrast=(0.5, 1.5)
+    Setting `preset` overrides both `enable` and the brightness/contrast kwargs.
+    Leave `preset` empty ("") to configure `enable` and `tfs` manually.
     """
 
-    # Set this flag to `true` to enable transforms during training
+    # Named preset — takes precedence over `enable` and brightness/contrast ranges when non-empty.
+    # Allowed values: "none" | "default" | "mild" | "" (manual).
+    preset: str = "none"
+    # Set this flag to `true` to enable transforms during training (ignored when preset != "")
     enable: bool = False
     # This is the maximum number of transforms (sampled from these below) that will be applied to each frame.
     # It's an integer in the interval [1, number_of_available_transforms].
@@ -213,6 +232,20 @@ class ImageTransformsConfig:
             ),
         }
     )
+
+    def __post_init__(self) -> None:
+        if not self.preset:
+            return  # manual mode — respect enable/tfs as-is
+        if self.preset not in _AUGMENTATION_PRESETS:
+            raise ValueError(
+                f"augmentation preset must be one of {list(_AUGMENTATION_PRESETS)}, got '{self.preset}'"
+            )
+        p = _AUGMENTATION_PRESETS[self.preset]
+        self.enable = p["enable"]
+        if "brightness" in p:
+            self.tfs["brightness"].kwargs["brightness"] = p["brightness"]
+        if "contrast" in p:
+            self.tfs["contrast"].kwargs["contrast"] = p["contrast"]
 
 
 def make_transform_from_config(cfg: ImageTransformConfig):

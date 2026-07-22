@@ -144,6 +144,77 @@ class SharpnessJitter(Transform):
         return self._call_kernel(F.adjust_sharpness, inpt, sharpness_factor=sharpness_factor)
 
 
+class ColorTemperatureJitter(Transform):
+    """Randomly shift the color temperature (white balance) of an image or video.
+
+    Simulates warm / cool lighting by applying per-channel multiplicative gains to
+    the RGB channels — the physical model of white balance. This is distinct from
+    everything ColorJitter offers: brightness (uniform scale), contrast, saturation
+    (pull toward / away from grey) and hue (rotate the whole color wheel). None of
+    those model a warm/cool cast, which is what causes a train/deploy domain gap
+    when the environment lighting is more yellow (or more blue) than the data.
+
+    A temperature is sampled uniformly from ``temperature`` (a [min, max] range):
+      - temperature > 0 -> warmer (boost R, cut B)  ==  偏黄 / 暖
+      - temperature < 0 -> cooler (cut R, boost B)  ==  偏蓝 / 冷
+      - temperature = 0 -> unchanged
+
+    The input is expected to have shape [..., 3, H, W] in RGB channel order. Both
+    float tensors (0.0-1.0) and uint8 tensors (0-255) are handled; non-RGB inputs
+    are returned untouched.
+
+    Args:
+        temperature: [min, max] range to sample from. A single number ``t`` is
+            treated as the symmetric range [-t, t]. Magnitudes are typically in
+            [0, 1]; at |t| = 1 the R/B channels are scaled by ``max_gain``.
+        max_gain: relative R (and inverse B) channel gain at |temperature| = 1.
+    """
+
+    def __init__(self, temperature: float | Sequence[float], max_gain: float = 0.30) -> None:
+        super().__init__()
+        self.temperature = self._check_input(temperature)
+        self.max_gain = float(max_gain)
+
+    def _check_input(self, temperature):
+        if isinstance(temperature, (int | float)):
+            temperature = [-abs(float(temperature)), abs(float(temperature))]
+        elif isinstance(temperature, collections.abc.Sequence) and len(temperature) == 2:
+            temperature = [float(v) for v in temperature]
+        else:
+            raise TypeError(f"{temperature=} should be a single number or a sequence with length 2.")
+
+        if temperature[0] > temperature[1]:
+            raise ValueError(f"temperature range should be (min, max), but got {temperature}.")
+
+        return float(temperature[0]), float(temperature[1])
+
+    def make_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
+        temperature = torch.empty(1).uniform_(self.temperature[0], self.temperature[1]).item()
+        return {"temperature": temperature}
+
+    def transform(self, inpt: Any, params: dict[str, Any]) -> Any:
+        t = params["temperature"]
+        # Fast paths: no-op temperature, or an input that isn't an RGB [..., 3, H, W] tensor.
+        if t == 0.0 or not isinstance(inpt, torch.Tensor):
+            return inpt
+        if inpt.ndim < 3 or inpt.shape[-3] != 3:
+            return inpt
+
+        # Per-channel gains: warm boosts R and cuts B; a small G tweak keeps it natural.
+        gains = torch.tensor(
+            [1.0 + self.max_gain * t, 1.0 + 0.05 * t, 1.0 - self.max_gain * t],
+            dtype=torch.float32,
+            device=inpt.device,
+        ).view(3, 1, 1)
+
+        is_uint8 = inpt.dtype == torch.uint8
+        max_val = 255.0 if is_uint8 else 1.0
+        x = (inpt.float() * gains).clamp_(0.0, max_val)
+        if is_uint8:
+            return x.round_().to(torch.uint8)
+        return x.to(inpt.dtype)
+
+
 @dataclass
 class ImageTransformConfig:
     """
@@ -190,6 +261,12 @@ class ImageTransformsConfig:
     # Named preset — takes precedence over `enable` and brightness/contrast ranges when non-empty.
     # Allowed values: "none" | "default" | "mild" | "" (manual).
     preset: str = "none"
+    # Color-temperature (white-balance) augmentation range as (min, max), sampled uniformly.
+    #   temp > 0 -> warmer (boost R, cut B, "偏黄/暖");  temp < 0 -> cooler ("偏蓝/冷").
+    # When set (non-None), this enables the color_temp transform and injects the range,
+    # regardless of `preset`/`enable` — set e.g. (0.0, 0.6) to cover a yellow-tinted
+    # deployment environment. Leave None to keep color-temp augmentation off.
+    color_temp: tuple[float, float] | None = None
     # Set this flag to `true` to enable transforms during training (ignored when preset != "")
     enable: bool = False
     # This is the maximum number of transforms (sampled from these below) that will be applied to each frame.
@@ -230,27 +307,55 @@ class ImageTransformsConfig:
                 type="RandomAffine",
                 kwargs={"degrees": (-5.0, 5.0), "translate": (0.05, 0.05)},
             ),
+            # Disabled by default (weight=0.0). Enabled + configured via `color_temp`
+            # (see __post_init__) so existing runs are unaffected until you opt in.
+            "color_temp": ImageTransformConfig(
+                weight=0.0,
+                type="ColorTemperatureJitter",
+                kwargs={"temperature": (-0.5, 0.5)},
+            ),
         }
     )
 
     def __post_init__(self) -> None:
-        if not self.preset:
-            return  # manual mode — respect enable/tfs as-is
-        if self.preset not in _AUGMENTATION_PRESETS:
-            raise ValueError(
-                f"augmentation preset must be one of {list(_AUGMENTATION_PRESETS)}, got '{self.preset}'"
-            )
-        p = _AUGMENTATION_PRESETS[self.preset]
-        self.enable = p["enable"]
-        if "brightness" in p:
-            self.tfs["brightness"].kwargs["brightness"] = p["brightness"]
-        if "contrast" in p:
-            self.tfs["contrast"].kwargs["contrast"] = p["contrast"]
+        # 1) Resolve the named preset (brightness/contrast + enable). Empty preset = manual mode.
+        if self.preset:
+            if self.preset not in _AUGMENTATION_PRESETS:
+                raise ValueError(
+                    f"augmentation preset must be one of {list(_AUGMENTATION_PRESETS)}, got '{self.preset}'"
+                )
+            p = _AUGMENTATION_PRESETS[self.preset]
+            self.enable = p["enable"]
+            if "brightness" in p:
+                self.tfs["brightness"].kwargs["brightness"] = p["brightness"]
+            if "contrast" in p:
+                self.tfs["contrast"].kwargs["contrast"] = p["contrast"]
+
+        # 2) Wire up color-temperature augmentation independently of the preset.
+        #    When set, it always turns on the color_temp transform. If the base
+        #    augmentation is otherwise off (preset="none"/enable=False), we isolate
+        #    color_temp by zeroing the other weights so ONLY color-temp is applied;
+        #    when base augmentation is on, color_temp joins the sampling pool.
+        if self.color_temp is not None:
+            if len(self.color_temp) != 2 or self.color_temp[0] > self.color_temp[1]:
+                raise ValueError(
+                    f"color_temp must be a (min, max) range with min <= max, got {self.color_temp}"
+                )
+            base_enabled = self.enable
+            self.tfs["color_temp"].weight = 1.0
+            self.tfs["color_temp"].kwargs["temperature"] = tuple(self.color_temp)
+            self.enable = True
+            if not base_enabled:
+                for name, tf_cfg in self.tfs.items():
+                    if name != "color_temp":
+                        tf_cfg.weight = 0.0
 
 
 def make_transform_from_config(cfg: ImageTransformConfig):
     if cfg.type == "SharpnessJitter":
         return SharpnessJitter(**cfg.kwargs)
+    if cfg.type == "ColorTemperatureJitter":
+        return ColorTemperatureJitter(**cfg.kwargs)
 
     transform_cls = getattr(v2, cfg.type, None)
     if isinstance(transform_cls, type) and issubclass(transform_cls, Transform):

@@ -43,6 +43,7 @@ from vtla.engine.utils.constants import (
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
 from vtla.frameworks.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
+from vtla.frameworks.tactile_temporal_processor import TactileTemporalWindowStep
 
 from .configuration_pi05 import PI05Config
 
@@ -166,9 +167,17 @@ def make_pi05_pre_post_processors(
     processor_features = {**config.normalizer_input_features(), **config.output_features}
 
     # OpenPI order: raw → relative → normalize → model → unnormalize → absolute
+    # Tactile temporal window step (inference-time buffering). No-op for F == 1.
+    tactile_window_step = TactileTemporalWindowStep(
+        tactile_keys=list(getattr(config, "tactile_windowed_keys", lambda: [])()),
+        num_frames=int(getattr(config, "tactile_num_frames", 1)),
+        frame_offset=int(getattr(config, "tactile_frame_offset", 1)),
+    )
+
     input_steps: list[ProcessorStep] = [
         RenameObservationsProcessorStep(rename_map={}),  # To mimic the same processor as pretrained one
         AddBatchDimensionProcessorStep(),
+        tactile_window_step,
         relative_step,
         # NOTE: NormalizerProcessorStep MUST come before Pi05PrepareStateTokenizerProcessorStep
         # because the tokenizer step expects normalized state in [-1, 1] range for discretization

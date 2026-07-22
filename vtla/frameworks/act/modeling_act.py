@@ -37,6 +37,7 @@ from vtla.engine.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_S
 
 from ..pretrained import PreTrainedPolicy
 from ..tactile_encode import TactileEncoder
+from ..utils import expand_tactile_as_image_window
 from .configuration_act import ACTConfig
 
 
@@ -130,8 +131,9 @@ class ACTPolicy(PreTrainedPolicy):
         self.eval()
 
         if self.config.image_features:
+            batch = expand_tactile_as_image_window(batch, self.config)
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_feature_keys_expanded()]
 
         actions = self.model(batch)[0]
         return actions
@@ -139,8 +141,9 @@ class ACTPolicy(PreTrainedPolicy):
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
+            batch = expand_tactile_as_image_window(batch, self.config)
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_feature_keys_expanded()]
 
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
@@ -371,7 +374,9 @@ class ACT(nn.Module):
         if self.tactile_mode_encode:
             self.tactile_encoder = TactileEncoder(config, config.dim_model)
             self.tactile_insert_location = config.tactile_insert_location
-            self.tactile_pos_embed = nn.Embedding(self.tactile_encoder.num_tokens, config.dim_model)
+            # Size to the FULL tactile window (num_frames * n_keys * num_query_tokens); a
+            # multi-frame history simply contributes more tactile tokens (oldest → current).
+            self.tactile_pos_embed = nn.Embedding(self.tactile_encoder.total_tokens, config.dim_model)
 
         # Transformer decoder.
         # Learnable positional embedding for the transformer's decoder (in the style of DETR object queries).
@@ -508,7 +513,8 @@ class ACT(nn.Module):
         if self.tactile_mode_encode and self.tactile_insert_location == "encoder":
             # The MAE encoder runs in bf16; cast its tokens to the surrounding token dtype
             # (float32 at inference, bf16 under autocast) so the stack below never mismatches.
-            tactile_tokens = self.tactile_encoder(batch).transpose(0, 1)  # (n_tac, B, D)
+            # forward_flat folds any tactile time axis into the token dim -> (B, n_tac, D).
+            tactile_tokens = self.tactile_encoder.forward_flat(batch).transpose(0, 1)  # (n_tac, B, D)
             tactile_tokens = tactile_tokens.to(encoder_in_tokens[0].dtype)
             tactile_pos = self.tactile_pos_embed.weight.unsqueeze(1)  # (n_tac, 1, D)
             encoder_in_tokens.extend(list(tactile_tokens))
@@ -525,7 +531,7 @@ class ACT(nn.Module):
         # only (they never pass through the ACT encoder), acting as an extra condition
         # the action queries can attend to.
         if self.tactile_mode_encode and self.tactile_insert_location == "decoder":
-            tactile_tokens = self.tactile_encoder(batch).transpose(0, 1)  # (n_tac, B, D)
+            tactile_tokens = self.tactile_encoder.forward_flat(batch).transpose(0, 1)  # (n_tac, B, D)
             tactile_tokens = tactile_tokens.to(encoder_out.dtype)
             tactile_pos = self.tactile_pos_embed.weight.unsqueeze(1)  # (n_tac, 1, D)
             encoder_out = torch.cat([encoder_out, tactile_tokens], dim=0)

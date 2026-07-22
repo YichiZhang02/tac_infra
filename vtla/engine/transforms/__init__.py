@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .transforms import (
+    ColorTemperatureJitter,
     ImageTransformConfig,
     ImageTransforms,
     ImageTransformsConfig,
@@ -22,6 +23,7 @@ from .transforms import (
 )
 
 __all__ = [
+    "ColorTemperatureJitter",
     "ImageTransformConfig",
     "ImageTransforms",
     "ImageTransformsConfig",

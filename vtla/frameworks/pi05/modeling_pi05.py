@@ -62,7 +62,7 @@ from vtla.engine.utils.constants import (
 
 from ..pretrained import PreTrainedPolicy, T
 from ..tactile_encode import TactileEncoder
-from ..utils import log_model_loading_keys
+from ..utils import expand_tactile_as_image_window, log_model_loading_keys
 from .configuration_pi05 import DEFAULT_IMAGE_SIZE, PI05Config
 
 try:
@@ -1199,7 +1199,8 @@ class PI05Policy(PreTrainedPolicy):
         """
         if self.config.tactile_mode != "encode" or self.tactile_encoder is None:
             return None
-        return self.tactile_encoder(batch)  # [B, n_keys, width]
+        # forward_flat folds any tactile time axis into the token dim -> [B, F*n_keys*N, width].
+        return self.tactile_encoder.forward_flat(batch)  # [B, n_tactile_tokens, width]
 
     def _preprocess_images(self, batch: dict[str, Tensor]) -> tuple[list[Tensor], list[Tensor]]:
         """Preprocess images for the model.
@@ -1213,7 +1214,12 @@ class PI05Policy(PreTrainedPolicy):
         # Get device from model parameters
         device = next(self.parameters()).device
 
-        vlm_image_keys = self.config.vlm_image_keys()
+        # Expand windowed tactile-as-image keys ([B,F,C,H,W] → per-frame [B,C,H,W]) AFTER
+        # normalisation (stats live under the base key). The resulting keys match
+        # image_feature_keys_expanded() so the per-frame cameras slot into the VLM sequence
+        # alongside the RGB cameras in a stable, predictable order.
+        batch = expand_tactile_as_image_window(batch, self.config)
+        vlm_image_keys = self.config.image_feature_keys_expanded()
         present_img_keys = [key for key in vlm_image_keys if key in batch]
         missing_img_keys = [key for key in vlm_image_keys if key not in batch]
 

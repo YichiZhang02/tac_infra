@@ -47,6 +47,38 @@ def populate_queues(
     return queues
 
 
+def expand_tactile_as_image_window(
+    batch: dict[str, torch.Tensor], config
+) -> dict[str, torch.Tensor]:
+    """Unbind the tactile time axis for ``tactile_mode='as_image'`` multi-frame windows.
+
+    When ``tactile_num_frames > 1`` the dataset delivers windowed tactile keys as
+    ``[B, F, C, H, W]`` (oldest → current). Each such key is replaced by ``F`` single-frame
+    keys ``<key>.f{i}`` of shape ``[B, C, H, W]`` so every framework's existing per-camera
+    image path consumes the window as extra cameras — no per-model loop changes needed.
+    The per-frame key order matches
+    :meth:`SensorRoutingMixin.image_feature_keys_expanded`.
+
+    No-op unless ``tactile_mode='as_image'`` and ``tactile_num_frames > 1``. Returns a shallow
+    copy with the expanded keys; the original windowed keys are removed. Call this AFTER
+    normalization (stats live under the base key and broadcast over the F axis).
+    """
+    if config.tactile_mode != "as_image" or int(getattr(config, "tactile_num_frames", 1)) <= 1:
+        return batch
+    windowed = set(config.tactile_windowed_keys())
+    out = dict(batch)
+    for key in windowed:
+        if key not in out:
+            continue
+        t = out[key]
+        if t.dim() != 5:  # already single-frame (defensive); leave as-is under the base key
+            continue
+        del out[key]
+        for i in range(t.shape[1]):
+            out[f"{key}.f{i}"] = t[:, i]
+    return out
+
+
 def get_device_from_parameters(module: nn.Module) -> torch.device:
     """Get a module's device by checking one of its parameters.
 

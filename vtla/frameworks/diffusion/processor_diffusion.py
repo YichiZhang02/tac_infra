@@ -31,6 +31,7 @@ from vtla.engine.processor import (
 )
 from vtla.engine.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 from vtla.frameworks.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
+from vtla.frameworks.tactile_temporal_processor import TactileTemporalWindowStep
 
 from .configuration_diffusion import DiffusionConfig
 
@@ -71,9 +72,17 @@ def make_diffusion_pre_post_processors(
     dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
     relative_step, absolute_step = make_ee_relative_steps(config)
 
+    # Tactile temporal window step (inference-time buffering). No-op for F == 1.
+    tactile_window_step = TactileTemporalWindowStep(
+        tactile_keys=list(getattr(config, "tactile_windowed_keys", lambda: [])()),
+        num_frames=int(getattr(config, "tactile_num_frames", 1)),
+        frame_offset=int(getattr(config, "tactile_frame_offset", 1)),
+    )
+
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+        tactile_window_step,
         relative_step,
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(

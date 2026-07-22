@@ -136,6 +136,44 @@ bash train.sh rm_umi_dual_pen_open diffusion
 
 触觉 encoder (仅 `tactile_mode=encode`): 通过 `TACTILE_ENCODER_PATH`(默认 `playground/pretrained_models/AnyTouch-ViT-L-16`)指定 tactile-MAE 权重作为 encoder 初始化, `arch`/`sensor_id`/`image_size` 从 checkpoint 自动读取。`encode` 模式下 encoder + query token 会**随 policy 一起训练**(非冻结)。
 
+#### 触觉时序窗口 (`tactile_num_frames` / `tactile_frame_offset`)
+
+两个新参数，让 policy 看到多帧触觉历史（而不只是当前帧），与 RGB 观测窗口**完全独立**，`encode` 和 `as_image` 模式均生效：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `TACTILE_NUM_FRAMES` | `1` | 每步喂给模型的触觉帧数（含当前帧）。`1` = 单帧 = 完全向后兼容。 |
+| `TACTILE_FRAME_OFFSET` | `1` | 相邻两帧的采样间隔（帧数）。`1` = 相邻帧；`k` = 每隔 k 帧采样一次。 |
+
+采样的 delta 索引为 `[-(F-1)*off, ..., -off, 0]`，例如 `F=3, off=2` 采样 `[-4, -2, 0]`（相对当前步）。
+
+**训练**：dataset 的 `delta_timestamps` 自动按上述索引拉取触觉帧，每个 finger 相机仍只解码一次视频（按 delta 多取帧，无额外 I/O）。触觉 key 收到的 tensor 形状为 `[B, F, C, H, W]`（`F=1` 时退化为 `[B, C, H, W]`，与现有行为完全一致）。
+
+**推理**：preprocessor pipeline 中自动插入 `TactileTemporalWindowStep`，维护每路 finger 的滑动帧缓冲；episode 切换时调用 `reset()` 清空。
+
+**各 policy 行为**：
+
+| Policy | encode 多帧 | as_image 多帧 |
+|---|---|---|
+| ACT | ✅ 展平为额外 token（positional embed 自动扩大） | ✅ 每帧作为独立相机输入 |
+| pi05 | ✅ 展平为额外 prefix token | ✅ 每帧作为独立相机 |
+| starvla_groot | ✅ 展平后 cat 到 hidden states | ✅ 每帧作为独立相机 |
+| diffusion | ✅ 展平到 global conditioning（独立于 n_obs_steps） | ❌ 不支持（diffusion 将所有相机对齐到 n_obs_steps 轴，多帧触觉无法加入该轴；请改用 encode 模式） |
+
+示例（3 帧触觉，间隔 1 帧，encode 模式）：
+
+```bash
+TACTILE_NUM_FRAMES=3 TACTILE_FRAME_OFFSET=1 \
+  bash train.sh rm_umi_dual_pen_open act 8 16 50000 false encode
+```
+
+示例（4 帧触觉，间隔 2 帧，as_image 模式，pi05）：
+
+```bash
+TACTILE_NUM_FRAMES=4 TACTILE_FRAME_OFFSET=2 \
+  bash train.sh rm_umi_dual_pen_open pi05 8 16 50000 false as_image
+```
+
 相机 / 触觉 key (draccus 列表 `[k1,k2,...]`, 按数据集命名用环境变量覆盖):
 
 - `TOP_CAM` (默认 `[observation.images.cam_top]`)

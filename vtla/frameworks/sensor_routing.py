@@ -98,6 +98,17 @@ class SensorRoutingMixin:
     # Number of learnable query tokens emitted by the tactile-MAE encoder per tactile
     # image. Total tactile tokens = len(tactile_keys) * tactile_num_tokens.
     tactile_num_tokens: int = 8
+    # --- tactile temporal window (independent of the RGB observation window) ---
+    # Number of tactile frames fed to the policy per step, INCLUDING the current frame.
+    # ``1`` (default) = current frame only = exact legacy behaviour. ``F>1`` stacks the
+    # current frame plus ``F-1`` earlier frames along a leading time axis, giving the
+    # policy short-horizon tactile history. Applies to both tactile_mode="as_image"
+    # and "encode". Decoupled from the shared observation window / n_obs_steps.
+    tactile_num_frames: int = 1
+    # Spacing, in dataset frames, between two consecutive tactile frames. ``1`` = adjacent
+    # frames; ``k`` = every k-th frame (wider temporal receptive field, same F frames).
+    # The sampled tactile delta indices are ``[-(F-1)*offset, ..., -offset, 0]``.
+    tactile_frame_offset: int = 1
     # By default the tactile-MAE encoder + query tokens are fine-tuned end-to-end with
     # the policy (the checkpoint is used as initialization). Set True to freeze the MAE
     # backbone and train only the query tokens + projection.
@@ -147,6 +158,49 @@ class SensorRoutingMixin:
     def tactile_encoder_keys(self) -> list[str]:
         """Tactile keys reserved for a dedicated encoder branch (``encode`` mode)."""
         return self._dedupe(list(self.tactile_keys)) if self.tactile_mode == "encode" else []
+
+    def tactile_windowed(self) -> bool:
+        """True when a multi-frame tactile history is requested (``tactile_num_frames > 1``)."""
+        return self.tactile_mode in ("as_image", "encode") and self.tactile_num_frames > 1
+
+    def tactile_delta_indices(self) -> list[int]:
+        """Frame offsets sampled for each tactile key, oldest → current.
+
+        ``[-(F-1)*offset, ..., -offset, 0]`` where ``F = tactile_num_frames`` and
+        ``offset = tactile_frame_offset``. ``F == 1`` yields ``[0]`` (current frame only).
+        These override the shared ``observation_delta_indices`` for tactile keys so the
+        tactile temporal window is independent of the RGB observation window.
+        """
+        f = int(self.tactile_num_frames)
+        off = int(self.tactile_frame_offset)
+        return [-(f - 1 - i) * off for i in range(f)]
+
+    def tactile_windowed_keys(self) -> list[str]:
+        """Tactile image keys that receive the temporal window (both as_image and encode)."""
+        if self.tactile_mode in ("as_image", "encode"):
+            return self._dedupe(list(self.tactile_keys))
+        return []
+
+    def image_feature_keys_expanded(self) -> list[str]:
+        """``image_features`` keys with windowed tactile-as-image keys expanded per frame.
+
+        Preserves the ``image_features`` insertion order (what the vision models iterate),
+        replacing each windowed tactile key with ``F`` per-frame keys ``<key>.f{i}``. When
+        the tactile window is inactive (F == 1 or not as_image) this returns the plain
+        ``image_features`` keys — i.e. exact legacy behaviour.
+        """
+        keys = list(self.image_features)
+        if not (self.tactile_mode == "as_image" and self.tactile_num_frames > 1):
+            return keys
+        windowed = set(self.tactile_windowed_keys())
+        f = int(self.tactile_num_frames)
+        out: list[str] = []
+        for key in keys:
+            if key in windowed:
+                out.extend(f"{key}.f{i}" for i in range(f))
+            else:
+                out.append(key)
+        return out
 
     def decoded_video_keys(self) -> list[str]:
         """All camera videos this policy actually consumes (RGB + tactile-as-image + tactile-encode).
@@ -226,6 +280,20 @@ class SensorRoutingMixin:
         if self.tactile_mode == "encode" and self.tactile_num_tokens < 1:
             raise ValueError(
                 f"tactile_num_tokens must be >= 1, got {self.tactile_num_tokens}."
+            )
+        # Tactile temporal window (both as_image and encode).
+        if self.tactile_num_frames < 1:
+            raise ValueError(
+                f"tactile_num_frames must be >= 1, got {self.tactile_num_frames}."
+            )
+        if self.tactile_frame_offset < 1:
+            raise ValueError(
+                f"tactile_frame_offset must be >= 1, got {self.tactile_frame_offset}."
+            )
+        if self.tactile_num_frames > 1 and self.tactile_mode == "none":
+            raise ValueError(
+                "tactile_num_frames > 1 requires tactile_mode in {'as_image', 'encode'} "
+                f"(got tactile_mode='none')."
             )
 
     def require_visual_feature(self, key: str, purpose: str) -> None:

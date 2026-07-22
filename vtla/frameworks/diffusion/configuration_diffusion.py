@@ -202,6 +202,18 @@ class DiffusionConfig(SensorRoutingMixin, PreTrainedConfig):
             )
         # Shared enum / reserved-mode validation (tactile_mode, state_mode, encoder).
         self.validate_sensor_modes()
+        # Diffusion fuses all cameras into a single [B, S, N, C, H, W] tensor on the shared
+        # n_obs_steps axis; an independent tactile-as-image window cannot join that axis, so
+        # we reject the combination here and recommend encode mode instead.
+        if self.tactile_mode == "as_image" and self.tactile_num_frames > 1:
+            raise ValueError(
+                "DiffusionConfig does not support tactile_mode='as_image' with "
+                f"tactile_num_frames={self.tactile_num_frames} > 1. Diffusion stacks every "
+                "camera on its shared n_obs_steps axis; a separate tactile temporal window "
+                "cannot be accommodated on that axis. Use tactile_mode='encode' instead "
+                "(the MAE encoder already handles an independent F-frame window via "
+                "global conditioning)."
+            )
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(

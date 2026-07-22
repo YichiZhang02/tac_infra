@@ -31,6 +31,7 @@ from vtla.engine.utils.import_utils import require_package
 
 from ..pretrained import PreTrainedPolicy
 from ..tactile_encode import TactileEncoder
+from ..utils import expand_tactile_as_image_window
 from .action_head.flow_matching_head import ActionHeadConfig, FlowmatchingActionHead
 from .configuration_starvla_groot import StarvlaGrootConfig
 from .qwen_vl_interface import QwenVLInterface
@@ -153,7 +154,10 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         """
         import torch.nn.functional as F
 
-        vlm_image_keys = self.config.vlm_image_keys()
+        # Expand windowed tactile-as-image keys ([B,F,C,H,W] → per-frame [B,C,H,W]) AFTER
+        # normalisation (stats live under the base key and broadcast over the F axis).
+        batch = expand_tactile_as_image_window(batch, self.config)
+        vlm_image_keys = self.config.image_feature_keys_expanded()
         present_keys = [key for key in vlm_image_keys if key in batch]
         if not present_keys:
             raise ValueError(
@@ -205,7 +209,8 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
 
         tactile_tokens = None
         if self.tactile_encoder is not None:
-            tactile_tokens = self.tactile_encoder(batch)  # [B, n_tac, H]
+            # forward_flat folds any tactile time axis into the token dim -> [B, F*n_keys*N, H].
+            tactile_tokens = self.tactile_encoder.forward_flat(batch)  # [B, n_tac, H]
 
         # Encoder side: inject tactile tokens into the Qwen-VL *input* embeddings so they
         # flow through every LLM layer alongside image/language tokens (deep fusion).

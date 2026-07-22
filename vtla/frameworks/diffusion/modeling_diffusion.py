@@ -95,17 +95,30 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
-        # Tactile-encode keys are cached per key so they get the same n_obs_steps
-        # temporal stacking as the other observations at inference time.
-        if self.config.tactile_mode == "encode":
+        # Tactile-encode keys at inference:
+        #   * F == 1 (legacy): each key gets its own per-frame queue (maxlen=n_obs_steps), stacked
+        #     by predict_action_chunk to form the [B,S,...] window — unchanged behaviour.
+        #   * F > 1 (windowed): the TactileTemporalWindowStep in the preprocessor pipeline has
+        #     already assembled the full [1, F, C, H, W] tensor before select_action is called.
+        #     We do NOT add these keys to the queue; predict_action_chunk preserves them as-is.
+        if self.config.tactile_mode == "encode" and not self.config.tactile_windowed():
             for key in self.config.tactile_encoder_keys():
                 self._queues[key] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """Predict a chunk of actions given environment observations."""
+        # Windowed tactile keys (F > 1) bypass the queue (they are pre-assembled by the
+        # inference preprocessor) and must be carried through separately.
+        windowed_tactile_keys = (
+            set(self.config.tactile_encoder_keys())
+            if (self.config.tactile_mode == "encode" and self.config.tactile_windowed())
+            else set()
+        )
+        windowed_tactile = {k: batch[k] for k in windowed_tactile_keys if k in batch}
         # stack n latest observations from the queue
         batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+        batch.update(windowed_tactile)
         actions = self.diffusion.generate_actions(batch, noise=noise)
 
         return actions
@@ -222,15 +235,31 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        # Tactile-encode branch: one projected token per tactile key joins the global
-        # conditioning (per observation step). tactile_insert_location is ignored for
-        # Diffusion since there is no explicit encoder/decoder token split.
+        # Tactile-encode branch: projected tactile tokens join the global conditioning.
+        # tactile_insert_location is ignored for Diffusion (no explicit encoder/decoder split).
+        #
+        # Two regimes, gated by tactile_num_frames:
+        #   * F == 1 (default): tactile rides the shared observation window (n_obs_steps),
+        #     exactly as before — it is part of the per-obs-step conditioning that gets
+        #     multiplied by n_obs_steps below (byte-for-byte legacy behaviour).
+        #   * F  > 1: the tactile temporal window is INDEPENDENT of n_obs_steps. The whole
+        #     F-frame window folds into a single flat vector (total_tokens * PROJ) appended
+        #     to the global conditioning once, NOT multiplied by n_obs_steps.
         self.tactile_mode_encode = config.tactile_mode == "encode"
+        self.tactile_windowed = bool(getattr(config, "tactile_windowed", lambda: False)())
+        tactile_flat_dim = 0
         if self.tactile_mode_encode:
             self.tactile_encoder = TactileEncoder(config, DIFFUSION_TACTILE_PROJ_DIM)
-            global_cond_dim += self.tactile_encoder.num_tokens * DIFFUSION_TACTILE_PROJ_DIM
+            if self.tactile_windowed:
+                # Decoupled window: total_tokens already includes the F frames.
+                tactile_flat_dim = self.tactile_encoder.total_tokens * DIFFUSION_TACTILE_PROJ_DIM
+            else:
+                # Legacy: single-step token count, multiplied by n_obs_steps below.
+                global_cond_dim += self.tactile_encoder.num_tokens * DIFFUSION_TACTILE_PROJ_DIM
 
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        self.unet = DiffusionConditionalUnet1d(
+            config, global_cond_dim=global_cond_dim * config.n_obs_steps + tactile_flat_dim
+        )
 
         self.noise_scheduler = _make_noise_scheduler(
             config.noise_scheduler_type,
@@ -327,20 +356,35 @@ class DiffusionModel(nn.Module):
         # Tactile features (tactile_mode="encode") added to the global conditioning.
         # tactile_insert_location does not change Diffusion (no explicit encoder/decoder
         # token split): the features always join the global conditioning vector.
+        #
+        # Legacy path (F == 1): tactile is per-obs-step [B, s, n_keys*P] and joins the
+        # per-step conditioning that is flattened over n_obs_steps below — unchanged.
+        tactile_flat = None
         if self.tactile_mode_encode:
-            tactile_feats = self.tactile_encoder(batch)  # [B, n_obs_steps, n_keys, P]
-            tactile_feats = tactile_feats.reshape(batch_size, n_obs_steps, -1)  # [B, s, n_keys*P]
-            # The MAE encoder runs in bf16; cast to the other conditioning feats' dtype so
-            # the torch.cat below never mismatches (float32 at inference, bf16 under autocast).
-            if global_cond_feats:
-                tactile_feats = tactile_feats.to(global_cond_feats[0].dtype)
-            global_cond_feats.append(tactile_feats)
+            if self.tactile_windowed:
+                # Decoupled F-frame window: fold everything into one flat [B, total_tokens*P]
+                # vector appended AFTER the per-step conditioning is flattened (it does not
+                # ride the n_obs_steps axis).
+                tactile_flat = self.tactile_encoder.forward_flat(batch)  # [B, F*n_keys*N, P]
+                tactile_flat = tactile_flat.reshape(batch_size, -1)  # [B, total_tokens*P]
+            else:
+                tactile_feats = self.tactile_encoder(batch)  # [B, n_obs_steps, n_keys, P]
+                tactile_feats = tactile_feats.reshape(batch_size, n_obs_steps, -1)  # [B, s, n_keys*P]
+                # The MAE encoder runs in bf16; cast to the other conditioning feats' dtype so
+                # the torch.cat below never mismatches (float32 at inference, bf16 under autocast).
+                if global_cond_feats:
+                    tactile_feats = tactile_feats.to(global_cond_feats[0].dtype)
+                global_cond_feats.append(tactile_feats)
 
         if self.config.env_state_feature:
             global_cond_feats.append(batch[OBS_ENV_STATE])
 
-        # Concatenate features then flatten to (B, global_cond_dim).
-        return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+        # Concatenate per-step features then flatten to (B, per_step_dim * n_obs_steps).
+        global_cond = torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+        # Append the decoupled tactile window vector (F > 1), if any.
+        if tactile_flat is not None:
+            global_cond = torch.cat([global_cond, tactile_flat.to(global_cond.dtype)], dim=-1)
+        return global_cond
 
     def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """

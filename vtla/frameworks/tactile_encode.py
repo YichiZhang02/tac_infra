@@ -59,6 +59,8 @@ class TactileEncoder(nn.Module):
             num_query_tokens=config.tactile_num_tokens,
         )
         self.output_dim = int(output_dim)
+        # Tactile temporal window: F frames fold into the token axis (see forward_flat).
+        self.num_frames = int(getattr(config, "tactile_num_frames", 1))
         self.proj = nn.Linear(self.extractor.feature_dim, self.output_dim)
         if self.extractor.compute_dtype is not None:
             self.proj.to(dtype=self.extractor.compute_dtype)
@@ -69,11 +71,34 @@ class TactileEncoder(nn.Module):
 
     @property
     def num_tokens(self) -> int:
-        """Total tactile tokens per (time) step: ``n_keys * num_query_tokens``."""
+        """Tactile tokens per (time) step: ``n_keys * num_query_tokens``."""
         return len(self.tactile_keys) * self.extractor.num_query_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tactile tokens across the whole window: ``num_frames * n_keys * num_query_tokens``.
+
+        Equals :attr:`num_tokens` when ``tactile_num_frames == 1``. Token-based policies size their
+        tactile position embedding to this so a multi-frame window is just extra tokens.
+        """
+        return self.num_frames * self.num_tokens
 
     def _missing_keys(self, batch: dict[str, Tensor]) -> list[str]:
         return [k for k in self.tactile_keys if k not in batch]
+
+    def forward_flat(self, batch: dict[str, Tensor]) -> Tensor:
+        """Tactile tokens with any time axis folded into the token axis.
+
+        Always returns ``[B, F * n_keys * N, output_dim]`` (``F = tactile_num_frames``,
+        ``F = 1`` for single-frame inputs). This lets the token-based policies (ACT / pi05 /
+        starvla_groot) treat a tactile history window as simply "more tokens" without any
+        per-frame bookkeeping — the frames enter as extra tokens ordered oldest → current.
+        """
+        feat = self.forward(batch)  # [B, n_tac, P] (4D input) or [B, T, n_tac, P] (5D input)
+        if feat.dim() == 4:
+            b, t, n, p = feat.shape
+            feat = feat.reshape(b, t * n, p)  # frames folded into token axis (oldest → current)
+        return feat
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         missing = self._missing_keys(batch)
